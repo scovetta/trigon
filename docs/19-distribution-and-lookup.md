@@ -178,6 +178,7 @@ trigon-evidence/                          main: a ruleset forbids force-push and
 ├── evidence/
 │   └── sha256/
 │       ├── 51/d0/51d0…3b                 a stabilizer-set manifest, shared by many records
+│       ├── 9e/04/9e04…c1                 a stabilizer-set module (WASM), shared by many records
 │       ├── 3d/88/3d88…1a                 a comparison report
 │       ├── b0/2f/b02f…77                 a strategy, as canonical JSON
 │       └── e5/c9/e5c9…04                 a guard manifest
@@ -330,6 +331,7 @@ branch = "main"
 origin = "github.com/<owner>/trigon-evidence"        # the log's origin, signed into records (D3)
 disputes = "https://github.com/<owner>/trigon-evidence/issues"   # the dispute pointer (D3)
 log_key = "~/.config/trigon/log.key"                 # read only by `trigon log sign`
+stabilizer_module = "~/.config/trigon/stabilizers.wasm"   # named in every verdict (docs/09 §7.1)
 divergences = "refuse"                               # or "feed" (D7)
 rebuilt_artifacts = "none"                           # or "github-release" (D4)
 same_host_confirmation = false                       # D8
@@ -358,13 +360,15 @@ without both keys is refused unless `trust_on_first_use = true`, the file form o
 `--trust-on-first-use`. The values shown for `branch`, `divergences`, `rebuilt_artifacts`,
 `same_host_confirmation`, `same_host_local_images`, `confirmation_interval`, `heartbeat`,
 `stale_after` and `frozen_after` are their defaults; `required` and `trust_on_first_use` default
-to `false`, and `repo`, `origin`, `disputes`, `log_key` and `checkpoint` to unset.
+to `false`, and `repo`, `origin`, `disputes`, `log_key`, `stabilizer_module` and `checkpoint` to
+unset. `stabilizer_module` is a path, expanded as `log_key` is.
 
 **A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
-`TRIGON_EVIDENCE_CONFIG` or `--config` names a file. It is chosen by whoever controls the project —
-in CI on a pull request, by the pull request's author — so it is held to less. It may only add
-`[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned, and
-with HTTPS URLs only. It cannot add a URL to a source that already exists, change or remove one,
+`TRIGON_EVIDENCE_CONFIG` or `--config` names a file; a `.trigon` that is a file rather than a
+directory holds none, and the project has no file of its own. It is chosen by whoever controls the
+project — in CI on a pull request, by the pull request's author — so it is held to less. It may only
+add `[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned,
+and with HTTPS URLs only. It cannot add a URL to a source that already exists, change or remove one,
 turn on trust on first use, set `required`, or change any other setting, and a file that tries is
 refused whole. A file it names — the checkpoint, a PEM attestation key — must be inside the working
 directory once symlinks are followed, so a project cannot have Trigon read a file of the host's by
@@ -390,6 +394,10 @@ names are compared ignoring ASCII case, in every file: on a case-insensitive fil
 pointer (§4.2 item 6) when both are set, and leaves both out, absent rather than empty, when they
 are not, so attesting for local use needs no repository. `publish` refuses a statement that lacks
 them, or names another origin, and a repository whose `keys/log.vkey` names a different origin.
+`attest` names `stabilizer_module` in every verdict it signs, as `evidence.stabilizerSetModule`,
+once the module has reported the run's set digest and stabilized both artifacts to the digests the
+run recorded, and refuses to sign otherwise; `attest --stabilizer-module <file>` names one in its
+place. `publish` refuses a verdict that names no module (§4.1, D9).
 `publication::decide` reads `same_host_confirmation`, `same_host_local_images` and
 `confirmation_interval` wherever it runs, `trigon serve` included. `same_host_local_images` matters
 only beside `same_host_confirmation`: with both set, a confirmation on the machine that made the
@@ -455,8 +463,10 @@ commit, and every publisher sees the same switch. `trigon serve --stop-divergenc
 is, a switch on what one server shows; the repository's file is the switch on what is published.
 When a publish repository is configured, `serve` reports that file's state, as of its publisher's
 last fetch, beside its own switch, and says which one is set. The kill-switch never could retract,
-and nothing here pretends otherwise. Safeguard 4, maintainer notification at publish time, has no
-channel yet; until D7 decides one, `publish` refuses divergences.
+and nothing here pretends otherwise. A later attempt that disagrees with a published verdict
+retracts nothing either: the record stands, and nothing withdraws it automatically (D10).
+Safeguard 4, maintainer notification at publish time, has no channel yet; until D7 decides one,
+`publish` refuses divergences.
 
 **Correction is by superseding, never by deleting.** A published record is immutable: it is
 content-addressed and its digest is in the log. So the superseding record names what it replaces,
@@ -508,13 +518,14 @@ names every piece of evidence by digest.
 | the `rebuild` envelope | inline | signed | every verdict with a rebuild |
 | the `buildobservation` envelope | inline | signed | every verdict |
 | the stabilizer-set manifest | `evidence/sha256/…` | by its file digest, in the verdict (§4.2 item 7) | every verdict |
+| the stabilizer-set module: the set as a WebAssembly module, which re-derives the verdict once no binary carries the set (D9, `docs/09` §7.1) | `evidence/sha256/…` | by digest, in the verdict, as `stabilizerSetModule` | every verdict; `publish` refuses one without it; never a void or a withdrawal |
 | the comparison report: per-member differences, codes, field edits and, where recorded, the per-pass progression | `evidence/sha256/…` | by digest, in the verdict | every verdict; never a void record |
 | the strategy, as the canonical JSON the run stores | `evidence/sha256/…` | by blob digest, in the verdict (§4.2 item 7) | every verdict with a rebuild |
 | the guard manifest | `evidence/sha256/…` | by digest, in `buildobservation`, or in `void/v1` | when the guard was armed |
 | the rebuilt artifact | a release asset named by its sha256 | by digest, in the verdict | every verdict except `exact`, if D4 decides to publish rebuilt artifacts; never a void record |
 
-Evidence files are content-addressed, so a stabilizer-set manifest shared by a thousand records is
-stored once.
+Evidence files are content-addressed, so a stabilizer-set manifest or module shared by a thousand
+records is stored once.
 
 A record file, illustratively — `records/7f/3a/7f3a…c2.json`:
 
@@ -533,6 +544,7 @@ A record file, illustratively — `records/7f/3a/7f3a…c2.json`:
   ],
   "evidence": {
     "stabilizerSetManifest": "sha256:51d0…3b",
+    "stabilizerSetModule": "sha256:9e04…c1",
     "comparison": "sha256:3d88…1a",
     "strategy": "sha256:b02f…77",
     "guardManifest": "sha256:e5c9…04",
@@ -594,8 +606,9 @@ acute. Every record must carry, and every client that shows a record must render
    never a boolean. Signed today, in the verdict.
 2. **The stabilizer set id and digest.** Signed today in the verdict. Missing from `rebuild`, where
    the attestor passes no set; to fix. The set digest covers pass ids, stages, risks and provenance
-   but not pass code, so a pass whose behaviour changes under an unchanged id keeps the digest; §11
-   asks what to do about that.
+   but not pass code, so a pass whose behaviour changes under an unchanged id keeps the digest. D9
+   (§11.1) decides what to do about that: each set is archived, as a WASM module in `evidence/`,
+   which the verdict names by digest (item 7).
 3. **When, and which Trigon version.** Signed today only in `rebuild`, whose subject is the
    *rebuilt* artifact, so a lookup by the upstream digest never reaches it. And the version it signs
    is the attestor's own, not the version that ran the build, which the run record did not keep
@@ -625,7 +638,9 @@ acute. Every record must carry, and every client that shows a record must render
    `{"kind": "url", "url": …}`, pointing at the repository's issues. Both carry the namespace, so D3
    is decided before either is signed.
 7. **The digests of the evidence the record names**: the comparison report, the rebuilt artifact,
-   the set manifest file and the strategy. Two of these need a digest that does not exist yet. The
+   the set manifest file, the strategy, and the stabilizer-set module that re-derives the verdict
+   once no binary carries its set (D9), which `attest` names only after it has reproduced the
+   run's stabilized digests. Two of these need a digest that does not exist yet. The
    stabilizer-set digest (`StabilizerSet::digest`) is a hash over sorted `id|stage|risk|provenance`
    rows, not the digest of the manifest file, so the verdict signs the manifest file's digest beside
    it. `rebuild`'s `strategy.json` byproduct named `strategyDigest`, which is a domain-separated
@@ -810,7 +825,13 @@ trigon verify-attestation --record <file> --source <name> \
   item 6), resolves the current record in the clone of the source whose origin `--origin` names, and
   fetches the evidence it names, so `--rerun-comparison` needs only the upstream artifact from the
   user, and the rebuilt artifact too unless the repository that holds the record publishes it (D4)
-  or the verdict is exact. Without `--rebuild <file>` it looks for the release
+  or the verdict is exact. Where the binary does not carry the stabilizer set the verdict names, the
+  claim is re-derived through the stabilizer-set module the record carries, held first to the
+  digest the verdict signs (D9, `docs/09` §7.1). A module cannot show which tier of pass fired, so
+  a `normalized` claim whose stabilized forms it re-derives equal is *consistent* rather than held,
+  and exits 0 as one that holds does: 0 is a verdict at or above `normalized_with_caveats`, which the
+  module does re-derive, and 4 would call a claim false that nothing re-derived contradicts
+  (`docs/09` §7.1). Without `--rebuild <file>` it looks for the release
   asset `sha256-<hex>` of the digest the verdict signs in that repository's `rebuilt-YYYY-MM`
   releases, where the repository is on github.com by an HTTPS or an SSH location, asking GitHub's
   API without a token; then in those of every other source that holds the record, but never one a
@@ -834,7 +855,9 @@ trigon verify-attestation --record <file> --source <name> \
   from `<dir>` is reported as unchecked, never as passed. `bundle` becomes optional. Without
   `--evidence`, `--source <name>` reads the source's own clones as its last sync left them, its
   chain followed into every repository it has gone on in. It opens no socket, so threat-model
-  property P21 — the verifier links no network client — stays true. Cloning is the default build's
+  property P21 — the verifier links no network client — stays true. It runs no stabilizer-set
+  module unless built `--features wasm`, and says so where a verdict's set is one it does not
+  carry. Cloning is the default build's
   job; verifying a clone needs no network at all.
 - **`--remote`**, on `lookup` and `check`, is the one-off alternative: plain HTTPS GETs from
   `raw.githubusercontent.com`, for a single question in a place a clone is unwelcome. It fetches the
@@ -843,6 +866,20 @@ trigon verify-attestation --record <file> --source <name> \
   included from the hash tiles; a record whose leaf it cannot prove fails verification. It tells
   GitHub which package was asked about, it is rate-limited for unauthenticated clients, and it sees
   a supersession only if the index file lists it; it says all three when used.
+- **Every report names the checkpoint it answered from** (D11). `lookup`, `check`, both forms of
+  `verify-attestation`, `evidence sync` and `evidence list` print, under each source, one line —
+  `checkpoint <origin> <size> <root>`, the three lines of the checkpoint's note on one, the root
+  spelled as the note spells it — for the checkpoint the answer was given from: the one the last
+  sync accepted, which the clones answer from, or for `--remote` the one fetched and verified. The
+  JSON (and `check`'s SARIF) carry it for each source as `checkpoint`, `{origin, size, root}`;
+  `verify-attestation --lookup` adds `otherSources`, every other source it asked, with what each
+  says and its `checkpoint`, and prints each after the record's report, under a `source` line of
+  its own, one per source even where two share a checkpoint; where it finds no current record, and
+  says what the sources say instead, it prints each under its source and lists them in its stop's
+  `sources`. The line is identical in every report, so two users compare their views of a log by
+  pasting it: at one size the roots must match, and two roots at one size are a split view (§8).
+  `evidence list` prints no line for a source whose clones cannot be opened, which answers from no
+  checkpoint, and says only the size its last sync recorded.
 
 **Exit codes**, because this ends up in CI:
 
@@ -910,9 +947,13 @@ design treats each as a separate witness, never as one pool.
   served from several places. `sync` fetches every one of them, verifies each log, and requires them
   to be consistent: at the same size the roots must match, and at different sizes the smaller must
   be a prefix of the larger. It answers from the largest, and reports a URL serving an older
-  checkpoint as lagging. A mismatch is an equivocation, reported with both signed notes. That is the
-  split-view check §8 otherwise lacks until witnesses cosign, and mirroring our repository on a
-  second host — Codeberg, GitLab, a self-hosted git server — makes it cheap for everyone.
+  checkpoint as lagging. A URL serving a repository with no log at all, which is what a mistyped
+  URL or a mirror not yet pushed to serves, is reported as one that could not be read and set
+  aside, the others answering: it says nothing, so it cannot be lying. A log that is there and does
+  not verify refuses the source. A mismatch is an equivocation, reported with both signed notes.
+  That is the split-view check §8 otherwise lacks until witnesses cosign, and a mirror of our
+  repository on a second host — Codeberg, GitLab, a self-hosted git server — would make it cheap
+  for everyone. We do not run one ourselves at first (D11).
 - **Sync, and failure, are per source.** `trigon evidence sync` brings every configured source up to
   date, in parallel. A source that cannot be reached still answers from its clone until the clone is
   stale, labelled with the checkpoint it came from; after that, or once the source is frozen, its
@@ -985,12 +1026,21 @@ timestamp, and freshness can rest on that instead.
   with a clone, so a missing or altered index file changes nothing it answers, and `--reconcile`
   repairs it. A checkpoint that does not extend the one the client last accepted is an equivocation
   or a rewrite: the client refuses it, prints both signed notes, and exits 4.
+- **A stabilizer-set module is run because the verdict signs it, not because of what it says.** A
+  module reports the set digest it implements, and any module can report any digest. A client runs
+  the module a record carries only when its sha256 is the `stabilizerSetModule` the signed verdict
+  names, so whoever can push to the repository cannot substitute another. That makes the module the
+  signer's, not an honest one: a signer who signs a false verdict can name a module that makes it
+  re-derive. The module is built reproducibly (`scripts/build-set-module.sh`), and rebuilding it
+  from source and comparing digests is how a reader who does not trust the signer checks it
+  (`docs/09` §7.1; threat model D39).
 - **The log is our word, made checkable.** A signed checkpoint over a Merkle tree lets anyone who
   kept an older checkpoint or an older clone prove that we rewrote history. Until witnesses cosign
   (phase 7b), nothing *prevents* a rewrite, and nothing stops GitHub or us from serving different
   clones different histories; both can only be caught — by one client comparing the mirrors of a
-  source (§6.1), or by two users comparing checkpoints. A client with no state of its own, such as a
-  fresh CI runner, detects a rollback only back to the checkpoint it was configured with, which is
+  source (§6.1), or by two users comparing checkpoints, which every report makes as easy as pasting
+  a line by printing each source's checkpoint root (D11). A client with no state of its own, such as
+  a fresh CI runner, detects a rollback only back to the checkpoint it was configured with, which is
   why the default source will ship with the checkpoint current at each client release. Every client
   is a full monitor, because it recomputes the whole tree.
 - **The keys, and what each is worth to a thief.** The log key is separate from the attestation key
@@ -1043,7 +1093,9 @@ timestamp, and freshness can rest on that instead.
 
 ## 9. What this design deliberately does not do
 
-- **No transparency log we do not run, and no Sigstore** (ADR-0014).
+- **No transparency log we do not run, and no Sigstore** (ADR-0014): not to sign, not to log, and
+  not as a bridge for a registry that one day takes third-party attestations as Sigstore bundles.
+  The owner dropped that bridge on 2026-09-30, because it buys nothing.
 - **No service.** Publishing is a push; reading is a clone. Nothing answers a query on our behalf.
 - **No account, no API key, no per-user state.** Cloning a public repository needs none.
 - **No writing into a publisher's namespace**, ever, even if a registry offers it. A third party's
@@ -1411,16 +1463,17 @@ answers and exit codes as `trigon check`, and refuses a release that is not logg
 
 ---
 
-## 11. Decisions for the owner, and open questions
+## 11. Decisions for the owner
 
-Each decision blocks something. D3 blocks phase 2, because the repository is signed into every
+Each open decision blocks something. D3 blocks phase 2, because the repository is signed into every
 record, and phase 9. D8 blocks phase 3. D4 and D5 block phase 5 — D4 because a record either names a
 rebuilt artifact or does not, and a published record is immutable. D4 does not block phase 2: the
 signed falsifying command takes the rebuilt artifact from the user when none is published (§4.2 item
 6). D2 blocks the first split of the repository, and the spike in phase 5 informs it. D7 blocks
 publishing any divergence, which phase 5 refuses until it is decided. D6 blocks phase 7a and the
-first rotation of the attestation key. D1 blocks phase 7b. Every decision that changes behaviour is
-also a setting (§2.4), so the code is built with each default and the decision flips it.
+first rotation of the attestation key. D1 blocks phase 7b. Every open decision that changes
+behaviour is also a setting (§2.4), so the code is built with each default and the decision flips
+it. D9 to D11 are decided, and §11.1 records them.
 
 **D1. Witnessing: now, later, or never?** Without it the log is ours alone, and a rewrite is
 detectable but not preventable. Recommendation: build phases 0 to 6 with the log already in
@@ -1489,20 +1542,55 @@ taken for a local image on sight: a registry's image is named by one as readily
 --confirm` asks podman which registry digests name it, pulls it again by one where one does, and
 records it as local only where none does.
 
-**Open questions:**
+**Two machines without a shared store.** The owner decided on 2026-09-30 that two machines confirm
+each other by moving runs between their stores rather than by sharing one: `trigon runs export`
+writes runs, with every file they name, to one uncompressed tar, and `trigon runs import` reads one
+into another store. Machine A exports its run; B imports it, confirms it with `rebuild --confirm`,
+and exports the confirming run; A imports that and publishes ([`using-trigon.md`](using-trigon.md),
+"Task: confirm on a second machine"). That meets safeguard 1's "different workers" with no
+infrastructure, and needs no `same_host_confirmation`. An import is checked whole before anything
+is written — every blob against its name, every file a record names present, the size bounded, and
+nothing but regular files at the paths an export writes — and writes each record as it came, with
+nothing about the importing machine, so the gate compares the host ids the two records carry. It
+checks the file and not the claims: a record's host id, start time, cache state and image pin are
+its maker's word, and importing a run trusts its maker as far as sharing a store with them would
+([threat model](threat-model.md) D40). That includes what B runs: `rebuild --confirm` of an
+imported run repeats the strategy the file carries, on the base image and at the egress tier its
+record names, and takes neither `--image` nor `--egress`.
 
-1. **What happens to the corpus when a stabilizer set changes?** Re-running everything is a warm
-   re-sweep; the alternative is records under several set digests and a client that picks. §4.2 item
-   2 sharpens it: the set digest does not cover pass code, so a behaviour change can hide under an
-   unchanged digest. Should the digest cover the code, or should each set be archived as WASM, in
-   `evidence/`, so that a claim can be re-derived under the set that made it?
-2. **Sigstore in the endgame.** If npm or PyPI ever accept third-party attestations, they will want
-   Sigstore bundles; ADR-0014 defers that bridge until then. What would it have to carry?
-3. **When the gate changes its mind after publication.** A later disagreeing attempt, or a crossed
-   false-mismatch rate, leaves a published verdict standing, and the kill-switch stops only what
-   comes next. Should `publish` then issue a `withdrawal/v1` with reason `attempts_disagree_later`
-   automatically, queue one for a human, or leave the record and let the history show the later run?
-4. **Comparing checkpoints between users.** Until witnesses exist, a split view is caught by a
-   client that syncs a source's mirrors, or when two users compare. Should the client print each
-   source's checkpoint root in every report, so that comparing is as easy as pasting a line into an
-   issue, and should we run the second mirror ourselves from day one?
+### 11.1 Decided
+
+D9 to D11 were this section's open questions. The owner decided them on 2026-09-30, and each is
+recorded here with the question it answered. No question is open. A fourth question, what a
+Sigstore bridge would have to carry if npm or PyPI ever accepted third-party attestations, was
+dropped on the same day rather than decided: no part of Sigstore is planned (§9).
+
+**D9. Each stabilizer set is archived, as a WASM module in `evidence/`.** The question was what
+happens to the corpus when a set changes. Re-running everything is a warm re-sweep, and the
+alternative is records under several set digests and a client that picks. §4.2 item 2 sharpened it:
+the set digest covers pass ids and not pass code, so a behaviour change can hide under an unchanged
+digest. The digest could have been made to cover the code; instead each set is archived (§4.1, §6,
+§8; `docs/09` §7.1), so that a claim is re-derived under the set that made it. The digest still
+covers ids and not code, so a pass whose behaviour changes still takes a new `-vN` id
+([`stabilizers.md`](stabilizers.md)): the new id moves the digest, and a record made under the old
+one is re-derived by the set archived under the old digest.
+
+**D10. When a later attempt disagrees with a published verdict, the record stands.** The question
+was what `publish` does when the gate changes its mind after publication: issue a `withdrawal/v1`
+with reason `attempts_disagree_later` automatically, queue one for a human, or leave the record and
+let the history show the later run. It leaves the record standing, and the history shows the later
+run: the run is kept in the store beside the attempts that were published, and the gate counts it
+against them as a disagreeing attempt, so nothing more is published from them (§3). Nothing
+withdraws a record automatically, and nothing queues a withdrawal. The log gains a leaf only if a
+human concludes that the verdict was wrong and supersedes or withdraws it by hand, with the reason
+`attempts_disagree_later` (§3). A crossed false-mismatch rate stays as §3 describes it: the
+kill-switch stops what comes next and retracts nothing.
+
+**D11. Every report prints each source's checkpoint root, and we run no second mirror at first.**
+Until witnesses exist (phase 7b), a split view is caught by a client that syncs a source's mirrors
+(§6.1), or when two users compare checkpoints (§8). The question was whether the client should
+print each source's checkpoint root in every report, so that comparing is as easy as pasting a
+line into an issue, and whether we should run the second mirror ourselves from day one. Every
+report prints the root. We do not run a second mirror ourselves at first. A mirror that anyone
+runs on another host is a location of the same source, and a client that syncs it holds it to the
+others (§6.1).

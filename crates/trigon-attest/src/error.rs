@@ -51,6 +51,17 @@ pub enum AttestError {
         got: String,
     },
 
+    /// A stabilizer-set module that is not the one the statement signs as
+    /// `evidence.stabilizerSetModule` (`crate::check_set_module`). The mistake of whoever handed it
+    /// in, as [`AttestError::WrongArtifact`] is, and refused before it runs: the signed digest, and
+    /// not what a module says about itself, is what makes an archived set worth running.
+    #[error(
+        "the stabilizer-set module given is not the one this statement names: it signs the module \
+         sha256:{signed}, and this file is sha256:{got}. A module is run only when it is the one \
+         the verdict signs, since any module can report the right set digest"
+    )]
+    WrongModule { signed: String, got: String },
+
     #[error(
         "the statement claims {claimed} for the {side} stabilized form; recomputing gives {actual}"
     )]
@@ -107,6 +118,7 @@ impl AttestError {
             | AttestError::Unsigned
             | AttestError::SetMismatch { .. }
             | AttestError::WrongArtifact { .. }
+            | AttestError::WrongModule { .. }
             | AttestError::Json(_)
             | AttestError::Io(_) => false,
         }
@@ -126,8 +138,9 @@ impl Classify for AttestError {
             | AttestError::SubjectRefuted { .. } => Fault::Bug,
             AttestError::Unsigned | AttestError::SetMismatch { .. } => Fault::Policy,
             // Not a refutation. Somebody handed the verifier the wrong file, which is a mistake to
-            // report as a mistake rather than as a signed lie.
-            AttestError::WrongArtifact { .. } => Fault::Upstream,
+            // report as a mistake rather than as a signed lie. So did whoever handed it a module
+            // the statement does not sign.
+            AttestError::WrongArtifact { .. } | AttestError::WrongModule { .. } => Fault::Upstream,
             // Evidence that cannot be read as what it says it is, as a log that cannot be read is
             // `Upstream`: somebody else's bytes, not a claim that was checked and failed.
             AttestError::Malformed(_)
@@ -189,6 +202,14 @@ mod tests {
                 false,
                 Fault::Upstream,
             ),
+            (
+                AttestError::WrongModule {
+                    signed: s(),
+                    got: s(),
+                },
+                false,
+                Fault::Upstream,
+            ),
             (AttestError::Unsigned, false, Fault::Policy),
             (
                 AttestError::SetMismatch {
@@ -243,6 +264,7 @@ mod tests {
             (LogError::Rule(s()), true, Fault::Bug),
             (LogError::Rotation(s()), true, Fault::Bug),
             (LogError::Malformed(s()), false, Fault::Upstream),
+            (LogError::NoLog(s()), false, Fault::Upstream),
             (LogError::Missing { path: s() }, false, Fault::Upstream),
             (
                 LogError::Io {

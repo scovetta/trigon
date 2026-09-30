@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # End to end, on this machine, through the evidence store of docs/19:
 #
-#   (a) keys and a local evidence repository: an attestation key, a log key, a bare git repository,
-#       evidence.toml, and `trigon log init`;
+#   (a) keys and a local evidence repository: an attestation key, a log key, the stabilizer-set
+#       module (built by scripts/build-set-module.sh where it is missing or stale), a bare git
+#       repository, evidence.toml, and `trigon log init`;
 #   (b) a rebuild of one package behind the mirror's egress filter (`--egress mirror-only`: the
 #       build's only route out is the mirror, pinned to the moment the package was published), and
 #       a second, cold attempt to confirm it, because a verdict never publishes on one attempt
 #       (ADR-0010 safeguard 1);
 #   (c) `trigon attest` and `trigon publish` into the repository;
 #   (d) the consumer's side: `evidence add` and `sync`, `lookup` by purl and by file, `check` over a
-#       lockfile, the record's own falsifying command, the network-free record check, and two
-#       checks that must fail (a record with one byte changed, a package never published).
+#       lockfile, the record's own falsifying command, the network-free record check, the module
+#       the record names and the repository holds, the claim re-derived through that module, and
+#       two checks that must fail (a record with one byte changed, a package never published).
 #
-# Usage: scripts/evidence-e2e.sh [PURL] [--egress mirror-only|deny-all|open] [--dir DIR]
-#   PURL      default pkg:npm/wrappy@1.0.2 (small, and reproduces behind the mirror)
+# Usage: scripts/evidence-e2e.sh PURL [--egress mirror-only|deny-all|open] [--dir DIR]
+#   PURL      the package to rebuild, publish and look up; required, with no default.
+#             pkg:npm/wrappy@1.0.2 is small, and reproduces behind the mirror.
 #   --egress  default mirror-only, the mirror's egress filter. `deny-all` gives the build no network
 #             at all, so only a package whose build fetches nothing reaches an outcome. `open`
 #             gives the gate a void, which publishes on one attempt. These are the tiers the podman
@@ -33,7 +36,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PURL="pkg:npm/wrappy@1.0.2"
+PURL=""
 EGRESS="mirror-only"
 DIR="$ROOT/work/evidence-e2e"
 while [ $# -gt 0 ]; do
@@ -45,6 +48,14 @@ while [ $# -gt 0 ]; do
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
 done
+# The package is the caller's to name, so a run without one stops here, before anything is made.
+if [ -z "$PURL" ]; then
+    {
+        echo "usage: scripts/evidence-e2e.sh PURL [--egress mirror-only|deny-all|open] [--dir DIR]"
+        echo "  for example: scripts/evidence-e2e.sh pkg:npm/wrappy@1.0.2 (--help says more)"
+    } >&2
+    exit 64
+fi
 # Only a tier trigon parses and the podman runner enforces: any other fails at the rebuild, after
 # the mirror image is built, and would be reported below as a package that reached no outcome.
 case "$EGRESS" in
@@ -57,6 +68,21 @@ if [ "$EGRESS" = open ]; then OK=3; else OK=0; fi
 
 TRIGON="${TRIGON:-$ROOT/target/debug/trigon}"
 [ -x "$TRIGON" ] || { echo "no trigon at $TRIGON: run \`cargo build -p trigon\` first" >&2; exit 1; }
+
+# The stabilizer-set module every published verdict names (docs/09 §7.1), built from this checkout
+# by scripts/build-set-module.sh, and built again only when it is missing or a source it is built
+# from is newer than it: the four crates it compiles, the lockfile, the toolchain and the script.
+MODULE="${CARGO_TARGET_DIR:-$ROOT/target}/wasm32-unknown-unknown/release/trigon_stabilize_wasm.wasm"
+MODULE_SOURCES=(
+    "$ROOT/crates/trigon-stabilize-wasm" "$ROOT/crates/trigon-stabilize"
+    "$ROOT/crates/trigon-archive" "$ROOT/crates/trigon-core"
+    "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/rust-toolchain.toml"
+    "$ROOT/scripts/build-set-module.sh"
+)
+if [ ! -f "$MODULE" ] || [ -n "$(find "${MODULE_SOURCES[@]}" -newer "$MODULE" -print -quit)" ]; then
+    echo "building the stabilizer-set module"
+    "$ROOT/scripts/build-set-module.sh"
+fi
 
 # Never delete an earlier run: move it aside.
 if [ -e "$DIR" ]; then
@@ -119,6 +145,8 @@ ATT_HEX="$(t public-key "$W/keys/attestation.key")"
 LOG_VKEY="$(t log public-key "$W/keys/log.key")"
 echo "attestation key  $ATT_HEX"
 echo "log key          $LOG_VKEY"
+cp "$MODULE" "$W/stabilizers.wasm"
+echo "set module       sha256:$(sha256sum "$W/stabilizers.wasm" | cut -d' ' -f1)"
 
 git init -q --bare -b main "$W/evidence.git"
 
@@ -130,6 +158,8 @@ branch = "main"
 origin = "$ORIGIN"
 disputes = "https://$ORIGIN/issues"
 log_key = "$W/keys/log.key"
+# Named in every verdict attest signs, and published beside it (docs/09 §7.1).
+stabilizer_module = "$W/stabilizers.wasm"
 # One machine, so the confirming attempt runs here, cold (docs/19 D8). Its base image was built
 # locally and has no registry digest to pull it again by; same_host_local_images accepts it.
 same_host_confirmation = true
@@ -261,6 +291,34 @@ RECORD_REL="$(cd "$W/evidence-checkout" && ls records/*/*/*.json | head -1)"
 cp "$W/evidence-checkout/$RECORD_REL" "$W/record.json"
 expect "$OK" verify-attestation --record "$W/record.json" --source e2e
 
+# The stabilizer-set module: a verdict names it, and the repository holds it, byte for byte the
+# module attest was given. A void names none.
+MODULE_SHA="$(sha256sum "$W/stabilizers.wasm" | cut -d' ' -f1)"
+NAMED="$(json_field "$W/record.json" evidence.stabilizerSetModule)"
+PUBLISHED="$W/evidence-checkout/evidence/sha256/${MODULE_SHA:0:2}/${MODULE_SHA:2:2}/$MODULE_SHA"
+if [ "$EGRESS" = open ]; then
+    if [ -z "$NAMED" ]; then PASSED+=("a void record names no stabilizer-set module")
+    else FAILED+=("a void record names the stabilizer-set module $NAMED"); fi
+else
+    if [ "$NAMED" = "sha256:$MODULE_SHA" ]; then
+        PASSED+=("the record names the stabilizer-set module sha256:$MODULE_SHA")
+    else
+        FAILED+=("the record names the stabilizer-set module '${NAMED:-none}', not sha256:$MODULE_SHA")
+    fi
+    if [ -f "$PUBLISHED" ] && [ "$(sha256sum "$PUBLISHED" | cut -d' ' -f1)" = "$MODULE_SHA" ]; then
+        PASSED+=("evidence/ holds the module: ${PUBLISHED#"$W/evidence-checkout/"}")
+    else
+        FAILED+=("evidence/ does not hold the module sha256:$MODULE_SHA")
+    fi
+    # The claim re-derived through the published module rather than the set compiled into this
+    # binary: `--stabilizers` runs a module whatever the binary carries, held to the digest the
+    # verdict signs. A `normalized` claim is consistent through it, which exits as one that holds.
+    cp "$PUBLISHED" "$W/published-module.wasm" 2>/dev/null || true
+    expect "$OK" verify-attestation --lookup "sha256:$UP_SHA" --origin "$ORIGIN" \
+        --rerun-comparison --upstream "$W/artifacts/$UP_NAME" "${REBUILD_ARGS[@]}" \
+        --stabilizers "$W/published-module.wasm"
+fi
+
 # Two that must fail.
 python3 - "$W/record.json" "$W/record-tampered.json" <<'EOF'
 import sys
@@ -285,6 +343,7 @@ Kept for inspection, in $W:
   record.json         the published record:  python3 -m json.tool $W/record.json
   store/              the runs:              $TRIGON runs --store $W/store
   evidence.toml       publisher and consumer configuration
+  stabilizers.wasm    the stabilizer-set module the verdict names
   keys/               attestation and log keys
   source $W/env.sh    then run trigon lookup / check / evidence list against this setup
 EOF

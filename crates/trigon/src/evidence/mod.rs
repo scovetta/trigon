@@ -29,7 +29,7 @@ use trigon_attest::location::printable;
 use trigon_attest::state::{FirstUse, KeysFile, SyncRecord};
 
 use crate::OutputFormat;
-pub(crate) use crate::clones::{Dirs, Failed, Opened};
+pub(crate) use crate::clones::{Dirs, Failed, Opened, checkpoint_json, checkpoint_line};
 
 /// `docs/19` §6: a source that failed verification, or one that could not answer.
 const FAILED: i32 = 4;
@@ -230,6 +230,7 @@ fn report_synced(opened: &Opened) {
             n => format!(", the last of the {n} logs of its chain"),
         }
     );
+    println!("{}", checkpoint_line(opened.checkpoint_of()));
     if let Some(f) = &opened.keys.first_use {
         println!("{}", first_use_line(f));
     }
@@ -397,6 +398,7 @@ pub(crate) fn list(output: OutputFormat, verbose: bool) -> Result<()> {
                     "lastAttempt": record.as_ref().and_then(|x| x.last_attempt),
                     "failure": record.as_ref().and_then(|x| x.failure.clone()),
                     "size": size(r, record).map(|(_, n)| n),
+                    "checkpoint": r.opened.as_ref().map(|o| checkpoint_json(o.checkpoint_of())),
                     "newestLeaf": newest(r, record),
                     "standing": r.standing.key(),
                     "why": standing_said(&r.standing),
@@ -455,8 +457,13 @@ pub(crate) fn list(output: OutputFormat, verbose: bool) -> Result<()> {
                 crate::style::wrap(&printable(&f.why), 10)
             );
         }
-        if let Some((origin, n)) = size(r, record) {
-            println!("checkpoint {n} leaves of `{origin}`");
+        match (&r.opened, size(r, record)) {
+            (Some(o), _) => println!("{}", checkpoint_line(o.checkpoint_of())),
+            (None, Some((origin, n))) => println!(
+                "recorded  {n} leaves of `{origin}`, by its last sync: nothing answers from its \
+                 clones now"
+            ),
+            (None, None) => {}
         }
         if let Some(t) = newest(r, record) {
             println!("newest    leaf logged {}", crate::rfc3339_from_unix(t));

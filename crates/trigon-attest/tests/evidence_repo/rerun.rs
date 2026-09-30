@@ -382,6 +382,10 @@ fn an_archived_set_re_derives_a_match_as_caveated_at_best_and_a_divergence_as_on
     assert_eq!(d.actual, trigon_core::Match::NormalizedWithCaveats);
     assert!(d.digests_match);
     assert_eq!(d.unchecked, ["differences", "applied", "members"]);
+    // Neither held nor refuted: consistent, the third answer (docs/09 §7.1).
+    assert!(!d.holds(), "{d:?}");
+    assert!(d.consistent(), "{d:?}");
+    assert!(!d.refuted(), "{d:?}");
 
     let (st, report) = published("b");
     let b = &pairs()["b"];
@@ -415,6 +419,103 @@ fn an_archived_set_re_derives_a_match_as_caveated_at_best_and_a_divergence_as_on
                 ..
             }
         ),
+        "{e}"
+    );
+}
+
+/// The third answer is for one case alone: a `normalized` claim whose stabilized forms re-derive
+/// equal through an archived set, which cannot show which tier of pass fired. It never promotes
+/// the re-derived outcome, and every other claim the digests decide is held or refuted as before:
+/// `normalized_with_caveats` holds, `exact` over different bytes and `divergent` over equal forms
+/// are refuted, and natively a `normalized` claim holds and is never merely consistent.
+#[test]
+fn only_a_normalized_claim_through_an_archived_set_is_consistent_and_never_promoted() {
+    let (st, _) = published("a2");
+    let a = &pairs()["a"];
+    let through = |st: &trigon_attest::Statement| {
+        rederive_with(st, a.upstream.clone(), a.rebuilt.clone(), Some(&mut Native)).unwrap()
+    };
+
+    let d = through(&st);
+    assert!(d.consistent() && !d.holds() && !d.refuted(), "{d:?}");
+    assert_eq!(d.actual, trigon_core::Match::NormalizedWithCaveats);
+
+    let d = rederive(&st, a.upstream.clone(), a.rebuilt.clone()).unwrap();
+    assert!(d.holds() && !d.consistent() && !d.refuted(), "{d:?}");
+
+    for (claim, holds) in [
+        ("normalized_with_caveats", true),
+        ("exact", false),
+        ("divergent", false),
+    ] {
+        let mut other = st.clone();
+        other.predicate["outcome"] = claim.into();
+        let d = through(&other);
+        assert_eq!(d.holds(), holds, "{claim}: {d:?}");
+        assert!(!d.consistent(), "{claim}: {d:?}");
+        assert_eq!(d.refuted(), !holds, "{claim}: {d:?}");
+        assert_eq!(
+            d.actual,
+            trigon_core::Match::NormalizedWithCaveats,
+            "{claim}"
+        );
+    }
+
+    // A disagreement over what the comparison found is a refutation whatever the outcomes, though
+    // an archived set never produces one itself.
+    let mut d = through(&st);
+    d.disagreements.push(trigon_attest::Disagreement {
+        field: "applied",
+        said: serde_json::json!([]),
+        rederived: serde_json::json!(["tar-time"]),
+    });
+    assert!(!d.consistent() && d.refuted(), "{d:?}");
+}
+
+/// A module is held to the one the statement signs by the sha256 of its bytes, before it runs:
+/// that binding, not what the module says of its own set, is what makes it worth running. A
+/// statement that signs no module binds none, and says so.
+#[test]
+fn a_module_is_held_to_the_one_the_statement_signs() {
+    let (mut st, _) = published("b");
+    let module = b"\0asm\x01\0\0\0 a module".to_vec();
+    assert_eq!(trigon_attest::signed_set_module(&st), None);
+    let unbound = trigon_attest::check_set_module(&st, &module).unwrap();
+    assert!(!unbound.signed);
+
+    let hex = |b: &[u8]| -> String {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    };
+    st.predicate["evidence"]["stabilizerSetModule"] = serde_json::json!({ "sha256": hex(&module) });
+    assert_eq!(
+        trigon_attest::signed_set_module(&st),
+        Some(hex(&module).as_str())
+    );
+    let bound = trigon_attest::check_set_module(&st, &module).unwrap();
+    assert_eq!(
+        bound,
+        trigon_attest::SetModule {
+            sha256: hex(&module),
+            signed: true
+        }
+    );
+
+    let other = b"\0asm\x01\0\0\0 another module";
+    let e = trigon_attest::check_set_module(&st, other).unwrap_err();
+    let trigon_attest::AttestError::WrongModule { signed, got } = &e else {
+        panic!("expected the wrong module, got {e}");
+    };
+    assert_eq!(signed, &hex(&module));
+    assert_eq!(got, &hex(other));
+    // The caller's mistake, as the wrong artifact is: never the statement failing verification.
+    assert!(!e.fails_verification(), "{e}");
+    assert!(
+        e.to_string()
+            .contains("any module can report the right set digest"),
         "{e}"
     );
 }

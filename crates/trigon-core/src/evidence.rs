@@ -157,9 +157,15 @@ impl ToolchainResolution {
 /// Intersect every claim about one tool.
 ///
 /// Versions are compared as dotted numeric sequences, which is what every toolchain here uses.
-/// A version this cannot parse is treated as evidence we do not understand and skipped with a
-/// note, rather than ordered lexically: "1.10" sorts before "1.9" as text, and a toolchain window
-/// silently off by a release is worse than one we declined to compute.
+/// A version this cannot parse is treated as evidence we do not understand and skipped, rather than
+/// ordered lexically: "1.10" sorts before "1.9" as text, and a toolchain window silently off by a
+/// release is worse than one we declined to compute.
+///
+/// Skipped with no note: the result has nowhere to carry one, so evidence that was all unreadable
+/// comes back `Unconstrained`, the same as none. Nothing reaches the skip today — the one caller,
+/// the Cargo heuristic, is handed edition floors the crates.io resolver writes from constants — and
+/// `docs/17-backlog.md` B11 records the `skipped` list this needs before the CI rung's evidence,
+/// read from workflow text, reaches it.
 pub fn resolve_toolchain(tool: &str, evidence: &[Evidence]) -> ToolchainResolution {
     let mut lo: Option<(Vec<u64>, &Evidence)> = None;
     let mut hi: Option<(Vec<u64>, &Evidence)> = None;

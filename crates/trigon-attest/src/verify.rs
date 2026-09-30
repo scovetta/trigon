@@ -129,6 +129,33 @@ impl Rederived {
             && self.disagreements.is_empty()
     }
 
+    /// Whether the claim is **consistent** with what was re-derived, where it could not be shown to
+    /// hold: a `normalized` claim re-derived through an archived set, whose stabilized forms are
+    /// equal, as the claim says.
+    ///
+    /// The third answer, beside holding and not holding. An archived set returns stabilized bytes
+    /// and nothing about which passes fired, so equal stabilized forms of different bytes
+    /// re-derive as `normalized_with_caveats` at most ([`rederive_with`]), and the claim's tier —
+    /// that every pass that fired was builtin at `metadata` or below — is not re-derived. That is
+    /// not a refutation: nothing re-derived contradicts the claim. Nor is it the claim holding, and
+    /// the re-derived outcome is never promoted to `normalized` to make it one.
+    ///
+    /// Only `normalized` over `normalized_with_caveats`, through an archived set, with both
+    /// stabilized digests the statement's. Any other difference between the two outcomes is one
+    /// the digests decide, and is refuted.
+    pub fn consistent(&self) -> bool {
+        self.rederived.is_none()
+            && self.digests_match
+            && self.disagreements.is_empty()
+            && self.claimed == Match::Normalized.to_string()
+            && self.actual == Match::NormalizedWithCaveats
+    }
+
+    /// Whether re-deriving refuted the claim: it neither holds nor is [`Self::consistent`] with it.
+    pub fn refuted(&self) -> bool {
+        !self.holds() && !self.consistent()
+    }
+
     /// Check a published comparison report — the comparison the run stored, which a record names
     /// by digest (`docs/19` §4.1) — against this re-derivation: its outcome, set, digests and
     /// what it found must be what re-deriving gives, field by field as a verdict signs them; and so
@@ -274,6 +301,56 @@ pub trait ArchivedStabilizer {
     fn digest(&mut self, profile: &str) -> Result<Digest, String>;
     fn stabilize(&mut self, profile: &str, format: Format, bytes: &[u8])
     -> Result<Vec<u8>, String>;
+}
+
+/// The stabilizer-set module a verdict signs, `evidence.stabilizerSetModule`, as the hex of its
+/// sha256. `None` for a verdict signed without one, a v1 statement, a void and a withdrawal.
+pub fn signed_set_module(statement: &Statement) -> Option<&str> {
+    statement
+        .predicate
+        .pointer("/evidence/stabilizerSetModule/sha256")
+        .and_then(serde_json::Value::as_str)
+}
+
+/// A stabilizer-set module held to the statement it is to re-derive ([`check_set_module`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetModule {
+    /// The sha256 of its bytes, in hex.
+    pub sha256: String,
+    /// Whether the statement signs it. `false` where the statement signs no module at all.
+    pub signed: bool,
+}
+
+/// Hold a stabilizer-set module's bytes to the module a statement signs, before anything runs them.
+///
+/// **This, and not the module's own answer, is what makes an archived set worth running.** A module
+/// is code, and the set digest it reports (`trigon_set_digest`) is whatever that code returns: one
+/// written to make a false claim hold can report the right digest, and stabilize any two artifacts
+/// to whatever the statement signs. The sha256 of its bytes, signed into the verdict, binds the
+/// module to the claim. It is the code the signer named, which anyone can rebuild from the source
+/// it was built from and compare (`scripts/build-set-module.sh`), and any other module is refused
+/// here, whoever offers it. [`rederive_with`] still asks the module for its set digest; that
+/// catches the wrong module, never a dishonest one.
+///
+/// A statement that signs no module — one signed before modules were, or without one — binds none,
+/// and a module given for it is held only to its own answer and to the stabilized digests the
+/// statement signs: [`SetModule::signed`] is `false`, and the caller says so.
+pub fn check_set_module(statement: &Statement, module: &[u8]) -> Result<SetModule, AttestError> {
+    let sha256 = hex(&Sha256::digest(module));
+    match signed_set_module(statement) {
+        None => Ok(SetModule {
+            sha256,
+            signed: false,
+        }),
+        Some(signed) if signed == sha256 => Ok(SetModule {
+            sha256,
+            signed: true,
+        }),
+        Some(signed) => Err(AttestError::WrongModule {
+            signed: signed.to_string(),
+            got: sha256,
+        }),
+    }
 }
 
 /// Re-derive a claim, optionally through a stabilizer set this binary does not carry.
@@ -437,7 +514,8 @@ pub fn rederive_with(
             // above; otherwise equality of the stabilized forms is `NormalizedWithCaveats`. Not
             // `Normalized`: the provenance cap needs each applied stabilizer's risk and provenance,
             // and a module that only returns bytes cannot supply them. Claiming the stronger
-            // outcome on less evidence is the one direction this must not err in.
+            // outcome on less evidence is the one direction this must not err in. A `normalized`
+            // claim re-derived so is consistent with it, and not refuted: `Rederived::consistent`.
             let outcome = if upstream == rebuild {
                 Match::Exact
             } else if ud == rd {

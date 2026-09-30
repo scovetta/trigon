@@ -312,6 +312,11 @@ pub struct PublishConfig {
     pub disputes: Option<String>,
     /// The log's private key, read only by `trigon log sign`. A path, never read here.
     pub log_key: Option<PathBuf>,
+    /// The stabilizer-set module `trigon attest` names in every verdict it signs, as
+    /// `scripts/build-set-module.sh` builds it, so the verdict stays re-derivable after the binary
+    /// stops carrying its set; `publish` refuses a verdict that names none. `attest
+    /// --stabilizer-module` wins over it. A path, never read here.
+    pub stabilizer_module: Option<PathBuf>,
     pub divergences: Divergences,
     pub rebuilt_artifacts: RebuiltArtifacts,
     /// docs/19 D8. `false` by default.
@@ -336,6 +341,7 @@ impl Default for PublishConfig {
             origin: None,
             disputes: None,
             log_key: None,
+            stabilizer_module: None,
             divergences: Divergences::default(),
             rebuilt_artifacts: RebuiltArtifacts::default(),
             same_host_confirmation: false,
@@ -725,6 +731,12 @@ impl EvidenceConfig {
                 publish.log_key = Some(
                     expand_path(&k, &base, home)
                         .map_err(|m| file_error(format!("[publish] log_key: {m}")))?,
+                );
+            }
+            if let Some(m) = p.stabilizer_module {
+                publish.stabilizer_module = Some(
+                    expand_path(&m, &base, home)
+                        .map_err(|e| file_error(format!("[publish] stabilizer_module: {e}")))?,
                 );
             }
             if let Some(d) = p.divergences {
@@ -1579,10 +1591,18 @@ fn read_project_file(path: &Path, project: &Path) -> Result<Option<String>, Conf
         rule,
     };
     // Not following the last link, so a link that points at nothing is a file that is there and
-    // is refused, rather than a file that is absent.
+    // is refused, rather than a file that is absent. A `.trigon` that is a file, not a directory,
+    // holds no `evidence.toml`, as `log/files.rs` reads it too.
     match std::fs::symlink_metadata(path) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(source) => {
             return Err(ConfigError::Read {
                 path: path.to_path_buf(),
@@ -1688,6 +1708,7 @@ struct PublishDoc {
     origin: Option<String>,
     disputes: Option<String>,
     log_key: Option<String>,
+    stabilizer_module: Option<String>,
     divergences: Option<Divergences>,
     rebuilt_artifacts: Option<RebuiltArtifacts>,
     same_host_confirmation: Option<bool>,

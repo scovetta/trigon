@@ -434,6 +434,29 @@ impl Archive {
 }
 
 impl Entry {
+    /// A regular file holding `bytes`, as a tar made from nothing lays one down: mode 0644, uid and
+    /// gid 0 with no names, and modified at the epoch. [`crate::tar::write`] makes of such entries
+    /// a tar that is a function of their paths, their order and their bytes alone.
+    ///
+    /// For a writer of its own files, which `trigon runs export` is. Every other entry is one a
+    /// parse read, and carries what the archive it came from said.
+    pub fn tar_file(path: EntryPath, ordinal: u32, bytes: Vec<u8>) -> Entry {
+        Entry {
+            path,
+            ordinal,
+            kind: EntryKind::Regular,
+            meta: Meta {
+                size: bytes.len() as u64,
+                mtime: Some(0),
+                mode: 0o644,
+            },
+            raw: RawMeta::Tar(TarRaw::default()),
+            body: Body::Inline(bytes),
+            dirty: false,
+            renamed_from: None,
+        }
+    }
+
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }

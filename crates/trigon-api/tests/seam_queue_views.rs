@@ -191,6 +191,56 @@ async fn a_credential_is_read_whatever_case_its_scheme_is_written_in() {
     }
 }
 
+/// A header of another scheme is no credential for this API: `Basic` is addressed to a proxy in
+/// front of the site, and refusing it would refuse every read behind that proxy. Reading is
+/// anonymous, `/v1/me` says so, and asking for a rebuild still wants a principal.
+#[tokio::test]
+async fn a_header_of_another_scheme_is_anonymous_and_asking_still_wants_a_principal() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower_service::Service as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, &["jobs", "identity"]).await;
+    q.add_principal("p-ada", "Ada", &["request"], 7, "tok-secret-ada")
+        .await
+        .unwrap();
+    let api = api_with(Some(q), Principal::Anonymous).await;
+
+    for (method, path, body, status) in [
+        ("GET", "/v1/me", "", 200),
+        (
+            "POST",
+            "/v1/runs",
+            r#"{"target":"pkg:npm/left-pad@1.3.0"}"#,
+            401,
+        ),
+    ] {
+        let mut router = trigon_api::router(api.clone());
+        let res = router
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("authorization", "Basic dXNlcjpwYXNz")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), status, "{path}");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        match path {
+            "/v1/me" => assert!(v["principal"].is_null(), "{v}"),
+            _ => assert_eq!(v["error"], "authentication_required", "{v}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_credential_nobody_issued_is_refused_and_never_read_as_the_public() {
     // Somebody who presented a credential and was treated as the public would spend a long time

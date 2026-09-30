@@ -16,6 +16,8 @@ use std::process::{Command, Output};
 
 use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store, UpstreamDigests};
 
+mod set_module;
+
 const TARGET: &str = "pkg:npm/demo@1.0.0";
 const ARTIFACT: &str = "demo-1.0.0.tgz";
 
@@ -795,4 +797,356 @@ fn prune_after_signing_keeps_what_a_divergence_or_another_run_still_needs() {
     );
     let digest = first.rebuild.unwrap().sha256;
     assert!(rt().block_on(store.blobs().get(&digest)).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The stabilizer-set module a verdict names (docs/09 §7.1)
+// ---------------------------------------------------------------------------------------------
+
+/// `[publish] stabilizer_module` in `d`'s `evidence.toml`.
+fn configure_module(d: &Path, module: &Path) {
+    let path = d.join("home/.config/trigon/evidence.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!("[publish]\nstabilizer_module = \"{}\"\n", module.display()),
+    )
+    .unwrap();
+}
+
+/// The set digest this binary's `tar-gzip` has, as the bytes a module reports.
+fn tar_gzip_digest() -> [u8; 32] {
+    *trigon_stabilize::profile("tar-gzip")
+        .unwrap()
+        .digest()
+        .as_bytes()
+}
+
+/// A verdict names the module only once the module has reproduced it, and names it by the sha256
+/// of the bytes `attest` ran: those bytes are kept in the store, for `publish` to copy, and the
+/// module is not named in the statements beside the verdict.
+#[test]
+fn a_verdict_names_the_module_that_reproduced_it_and_the_store_keeps_its_bytes() {
+    let d = dir("module-named");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let run = rt().block_on(compared_run(&store, "1789003000-b0b0b0b0", TARGET, &u, &r));
+    let module = set_module::built();
+    let bytes = std::fs::read(&module).unwrap();
+    let hex = set_module::sha256(&bytes);
+
+    let said = ok(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    assert!(said.contains(&format!("module    sha256:{hex}")), "{said}");
+    assert!(
+        said.contains("stabilizes both artifacts as the run did, so the verdict names it"),
+        "{said}"
+    );
+    let all = statements(&store, &run.id);
+    let verdict = the(&all, trigon_attest::EQUIVALENCE_V2);
+    assert_eq!(
+        verdict["predicate"]["evidence"]["stabilizerSetModule"]["sha256"],
+        hex.as_str()
+    );
+    for other in [trigon_attest::REBUILD, trigon_attest::BUILD_OBSERVATION] {
+        assert!(
+            !the(&all, other).to_string().contains(&hex),
+            "{other} names the module"
+        );
+    }
+    let digest = trigon_core::Digest::from_hex(&hex).unwrap();
+    let kept = rt().block_on(store.blobs().get(&digest)).unwrap();
+    assert_eq!(&kept[..], &bytes[..]);
+}
+
+/// `--stabilizer-module` wins over `[publish] stabilizer_module`, which is read where the flag is
+/// not given: a configured module that is not the run's set is refused, and the flag's is signed.
+#[test]
+fn the_flag_wins_over_the_configured_module() {
+    let d = dir("module-flag");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let run = rt().block_on(compared_run(&store, "1789003100-b1b1b1b1", TARGET, &u, &r));
+    let configured = d.join("configured.wasm");
+    std::fs::write(&configured, set_module::fake([0x11; 32], b"x")).unwrap();
+    configure_module(&d, &configured);
+
+    let err = refused(&attest(&d, &run.id, &[]));
+    assert!(err.contains(&configured.display().to_string()), "{err}");
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+
+    let module = set_module::built();
+    ok(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    let verdict = the(&statements(&store, &run.id), trigon_attest::EQUIVALENCE_V2);
+    assert_eq!(
+        verdict["predicate"]["evidence"]["stabilizerSetModule"]["sha256"],
+        set_module::sha256(&std::fs::read(&module).unwrap()).as_str()
+    );
+}
+
+/// A module of another set is refused before anything is signed, and the refusal names both sets:
+/// it would be named beside a claim it cannot have made.
+#[test]
+fn a_module_of_another_set_is_refused_and_nothing_is_signed() {
+    let d = dir("module-other-set");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let run = rt().block_on(compared_run(&store, "1789003200-b2b2b2b2", TARGET, &u, &r));
+    let module = d.join("other.wasm");
+    std::fs::write(&module, set_module::fake([0x11; 32], b"x")).unwrap();
+
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    let native = trigon_stabilize::profile("tar-gzip")
+        .unwrap()
+        .digest()
+        .to_hex();
+    assert!(
+        err.contains(&format!(
+            "implements `tar-gzip@111111111111…`, and the run compared under `tar-gzip@{}…`",
+            &native[..12]
+        )),
+        "{err}"
+    );
+    assert!(err.contains("Nothing was signed"), "{err}");
+    assert!(statements(&store, &run.id).is_empty());
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+}
+
+/// The set digest is the module's own word. A module that gives the right one and stabilizes
+/// differently would be named beside a claim it does not reproduce, so the stabilized digests are
+/// what `attest` holds it to, and it is refused.
+#[test]
+fn a_module_with_the_right_set_digest_that_stabilizes_differently_is_refused() {
+    let d = dir("module-liar");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let run = rt().block_on(compared_run(&store, "1789003300-b3b3b3b3", TARGET, &u, &r));
+    let module = d.join("liar.wasm");
+    std::fs::write(&module, set_module::fake(tar_gzip_digest(), b"stable")).unwrap();
+
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    let recorded = compare(&u, &r).upstream.stabilized.sha256.to_hex();
+    assert!(
+        err.contains(&format!(
+            "reports the run's set digest, and stabilizes the published artifact to sha256:{}, \
+             where the run recorded sha256:{recorded}",
+            set_module::sha256(b"stable")
+        )),
+        "{err}"
+    );
+    assert!(statements(&store, &run.id).is_empty());
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+}
+
+/// The published artifact stabilized natively, as `compare` stabilizes it.
+fn stabilized(bytes: &[u8]) -> Vec<u8> {
+    let set = trigon_stabilize::profile("tar-gzip").unwrap();
+    let mut notes = Vec::new();
+    let mut parsed = trigon_archive::parse(
+        bytes.to_vec(),
+        trigon_core::Format::TarGz,
+        &trigon_archive::Limits::default(),
+        &mut notes,
+    )
+    .unwrap();
+    trigon_stabilize::apply(&set, &mut parsed.archive);
+    trigon_archive::serialize(&parsed.archive, true).unwrap()
+}
+
+/// Both artifacts are held to what the run recorded, not the first alone. In a divergence the two
+/// stabilized digests differ, and a module that stabilizes the published artifact as the run did
+/// and the rebuilt one otherwise reproduces half the claim: it is refused on the rebuilt side.
+#[test]
+fn a_module_that_reproduces_the_published_side_alone_is_refused_on_the_rebuilt_one() {
+    let d = dir("module-half");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"y\n", 1));
+    let run = rt().block_on(compared_run(&store, "1789003350-b3b3b3b3", TARGET, &u, &r));
+    assert_eq!(run.outcome.as_deref(), Some("divergent"));
+    let c = compare(&u, &r);
+    let published = stabilized(&u);
+    assert_eq!(
+        set_module::sha256(&published),
+        c.upstream.stabilized.sha256.to_hex()
+    );
+    let module = d.join("half.wasm");
+    std::fs::write(&module, set_module::fake(tar_gzip_digest(), &published)).unwrap();
+
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    assert!(
+        err.contains(&format!(
+            "reports the run's set digest, and stabilizes the rebuilt artifact to sha256:{}, \
+             where the run recorded sha256:{}",
+            set_module::sha256(&published),
+            c.rebuild.stabilized.sha256.to_hex()
+        )),
+        "{err}"
+    );
+    assert!(statements(&store, &run.id).is_empty());
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+}
+
+/// `attest` says which commit a module names beside the commit this Trigon was built from: where a
+/// verifier who would rather rebuild the module than run it starts. The commit is the module's
+/// word, said and never refused, since `attest` asks of a module only that it reproduce the claim;
+/// but an answer that is not a commit is refused, as a module that cannot say what it is.
+#[test]
+fn attest_says_which_commit_the_module_names() {
+    let d = dir("module-commit");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let stable = stabilized(&u);
+    assert_eq!(stable, stabilized(&r), "both sides stabilize alike");
+    let version = ok(&trigon(&d, &["--version"]));
+    let ours = version.trim().split_once("+git.").unwrap().1.to_string();
+    let other = "a".repeat(40);
+
+    let mut cases = vec![
+        (
+            None,
+            "commit    the module names no commit it was built from".to_string(),
+        ),
+        (
+            Some(other.clone()),
+            format!("commit    the module was built from {other}, and this Trigon from {ours}"),
+        ),
+        (
+            Some(format!("{other}.dirty")),
+            format!(
+                "commit    the module was built from a tree with changes {other} does not have, \
+                 so nobody can rebuild it from a commit"
+            ),
+        ),
+    ];
+    // A clean build of this Trigon has a commit a module can share; CI's is one.
+    if ours.len() == 40 {
+        cases.push((
+            Some(ours.clone()),
+            format!("commit    the module was built from {ours}, as this Trigon was"),
+        ));
+    }
+    for (n, (commit, says)) in cases.into_iter().enumerate() {
+        let id = format!("17890037{n:02}-c0c0c0c0");
+        let run = rt().block_on(compared_run(&store, &id, TARGET, &u, &r));
+        let module = d.join(format!("module-{n}.wasm"));
+        let bytes = set_module::fake_naming(tar_gzip_digest(), &stable, commit.as_deref());
+        std::fs::write(&module, &bytes).unwrap();
+        let said = ok(&attest(
+            &d,
+            &run.id,
+            &["--stabilizer-module", module.to_str().unwrap()],
+        ));
+        assert!(said.contains(&says), "{commit:?}: {said}");
+        let verdict = the(&statements(&store, &run.id), trigon_attest::EQUIVALENCE_V2);
+        assert_eq!(
+            verdict["predicate"]["evidence"]["stabilizerSetModule"]["sha256"],
+            set_module::sha256(&bytes).as_str()
+        );
+    }
+
+    let run = rt().block_on(compared_run(&store, "1789003799-c0c0c0c0", TARGET, &u, &r));
+    let module = d.join("not-a-commit.wasm");
+    let bytes = set_module::fake_naming(tar_gzip_digest(), &stable, Some("v1.0"));
+    std::fs::write(&module, bytes).unwrap();
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", module.to_str().unwrap()],
+    ));
+    assert!(
+        err.contains("names the commit it was built from as something that is not a commit"),
+        "{err}"
+    );
+    assert!(statements(&store, &run.id).is_empty());
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+}
+
+/// A file that is no module, and a file that is not there, are refused as what they are, before
+/// anything is signed.
+#[test]
+fn a_module_that_cannot_be_read_or_loaded_is_refused() {
+    let d = dir("module-unloadable");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let run = rt().block_on(compared_run(&store, "1789003400-b4b4b4b4", TARGET, &u, &r));
+    let notes = d.join("notes.wasm");
+    std::fs::write(&notes, b"{\"not\": \"a module\"}").unwrap();
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &["--stabilizer-module", notes.to_str().unwrap()],
+    ));
+    assert!(err.contains("cannot be loaded"), "{err}");
+    let err = refused(&attest(
+        &d,
+        &run.id,
+        &[
+            "--stabilizer-module",
+            d.join("missing.wasm").to_str().unwrap(),
+        ],
+    ));
+    assert!(err.contains("reading the stabilizer-set module"), "{err}");
+    assert!(statements(&store, &run.id).is_empty());
+    assert!(filed_for(&d, &run.id).is_empty(), "{:?}", filed(&d));
+}
+
+/// A void makes no claim to re-derive, so it names no module, and a configured one is not even
+/// read; and without a module a verdict is signed as before, saying that `publish` will refuse it.
+#[test]
+fn a_void_names_no_module_and_a_verdict_without_one_says_what_it_lacks() {
+    let d = dir("module-void");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (one(b"x\n", 1), one(b"x\n", 2));
+    let mut void = rt().block_on(compared_run(&store, "1789003500-b5b5b5b5", TARGET, &u, &r));
+    void.environment.egress = "open".into();
+    void.environment.attestable = false;
+    rt().block_on(store.put_run(&void)).unwrap();
+    configure_module(&d, &d.join("never-read.wasm"));
+    let said = ok(&attest(&d, &void.id, &[]));
+    assert!(!said.contains("module    "), "{said}");
+    let st = the(&statements(&store, &void.id), trigon_attest::VOID);
+    assert!(
+        st["predicate"]["evidence"]
+            .get("stabilizerSetModule")
+            .is_none(),
+        "{st}"
+    );
+
+    std::fs::remove_file(d.join("home/.config/trigon/evidence.toml")).unwrap();
+    let plain = rt().block_on(compared_run(&store, "1789003600-b6b6b6b6", TARGET, &u, &r));
+    let said = ok(&attest(&d, &plain.id, &[]));
+    assert!(
+        said.contains("module    none: the verdict names no stabilizer-set module"),
+        "{said}"
+    );
+    assert!(said.contains("`trigon publish` refuses it"), "{said}");
+    let verdict = the(
+        &statements(&store, &plain.id),
+        trigon_attest::EQUIVALENCE_V2,
+    );
+    assert!(
+        verdict["predicate"]["evidence"]
+            .get("stabilizerSetModule")
+            .is_none(),
+        "{verdict}"
+    );
 }

@@ -18,8 +18,9 @@ set unless you run `verify` or `stabilize` with `--profile npm-tarball`, so the 
 reports `tar-gzip`.
 
 **If you are new,** start with [`docs/introduction.md`](docs/introduction.md), which explains what
-Trigon is, how it works and how to use it, in ten minutes. `scripts/evidence-e2e.sh` runs the whole
-loop on one machine: rebuild a package, publish the verdict, and check it as a consumer would.
+Trigon is, how it works and how to use it, in ten minutes.
+`scripts/evidence-e2e.sh pkg:npm/wrappy@1.0.2` runs the whole loop on one machine for the package
+you name: rebuild it, publish the verdict, and check it as a consumer would.
 
 **If you are using it,** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide:
 install, compare two artifacts, rebuild a package, read a verdict, and what a verdict does *not*
@@ -633,6 +634,8 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
+rustup target add wasm32-unknown-unknown    # once: the stabilizer-set module's target
+scripts/build-set-module.sh                 # the module the parity and publish tests run
 cargo test --workspace                      # 939 pass, 0 fail
 TRIGON_LIVE=1 cargo test --workspace        # plus the ones that need a network
 cargo run -p xtask -- policy                # the dependency policy
@@ -644,10 +647,12 @@ scripts/cross-machine-verify.sh             # the claim a third party can check
 cargo llvm-cov --workspace --no-fail-fast --summary-only \
   --ignore-filename-regex '(/tests?/|/xtask/)'
 
-# The archived stabilizer set, which needs a second target and is not in the default
-# run. Without the module the parity tests skip and the run still exits 0, so CI
-# greps for the two test names rather than trusting the exit code.
-cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+# The archived stabilizer set's parity tests on their own. `cargo test --workspace` runs
+# them through the `wasm` feature and fails without the module built first. Tested alone,
+# the crate needs `--features host`: without it the parity tests compile to nothing and
+# the run still exits 0, so CI greps for the two test names rather than trusting the
+# exit code.
+scripts/build-set-module.sh
 cargo test  -p trigon-stabilize-wasm --features host
 ```
 

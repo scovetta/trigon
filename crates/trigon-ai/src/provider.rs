@@ -266,6 +266,13 @@ pub enum LlmError {
     /// Nothing was returned, so there is nothing to parse and nothing that says why.
     #[error("the provider ended the turn without an answer: {0}")]
     EmptyTurn(String),
+    /// The prompt is larger than the channel that hands it to the provider, so nothing was sent.
+    ///
+    /// The Copilot CLI takes its prompt as one command-line argument, and the kernel bounds one.
+    /// Distinct from `Transport`, which is asked again: the same prompt is the same size next time.
+    /// `limit` says which bound it met, and how large that is where it is known.
+    #[error("the prompt is {bytes} bytes and {limit}, so nothing was sent")]
+    PromptTooLarge { bytes: usize, limit: String },
     #[error("transport: {0}")]
     Transport(String),
 }
@@ -284,6 +291,9 @@ impl trigon_core::Classify for LlmError {
             // gave it was too small for the answer we wanted. Charging this upstream would put a
             // configuration mistake of ours in a column about somebody else's reliability.
             LlmError::Truncated { .. } => trigon_core::Fault::Bug,
+            // Ours as well: the prompt is ours, and so is the choice of a channel too narrow for
+            // it. Nothing reached the provider, so it has no part in this.
+            LlmError::PromptTooLarge { .. } => trigon_core::Fault::Bug,
         }
     }
 
@@ -317,6 +327,8 @@ impl trigon_core::Classify for LlmError {
             // identical wall, which is the shape `docs/07-ai.md` §5's "if the failure signature
             // repeats twice, abort" exists to stop.
             LlmError::Truncated { .. } => false,
+            // The same prompt is the same size on the next attempt, and meets the same bound.
+            LlmError::PromptTooLarge { .. } => false,
         }
     }
 }
@@ -600,6 +612,15 @@ mod tests {
             (LlmError::Malformed("?".into()), Fault::Upstream, false),
             // No answer is not a different answer: the next attempt is the first one.
             (LlmError::EmptyTurn("nothing".into()), Fault::Infra, true),
+            // Our prompt, too large for our channel, and the same size on the next attempt.
+            (
+                LlmError::PromptTooLarge {
+                    bytes: 200_000,
+                    limit: "one argument".into(),
+                },
+                Fault::Bug,
+                false,
+            ),
         ];
         for (e, fault, retryable) in cases {
             assert_eq!(e.fault(), fault, "{e:?}");

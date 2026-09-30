@@ -27,6 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      # `trigon publish` refuses a verdict that names no stabilizer-set module, so every test that
+      # publishes one names the module this checkout builds, and fails saying how to build it
+      # where it is missing rather than passing without it.
+      - run: rustup target add wasm32-unknown-unknown
+      - run: scripts/build-set-module.sh
       - run: cargo test --workspace
 
   # The archived stabilizer set and the compiled one must produce the same bytes. `docs/13-roadmap.md`
@@ -43,7 +48,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add wasm32-unknown-unknown
-      - run: cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+      # The module as it is published: built reproducibly, as `trigon attest` names it.
+      - run: scripts/build-set-module.sh
       - name: the archived set agrees with the compiled one
         run: |
           out=$(cargo test -p trigon-stabilize-wasm --features host 2>&1)

@@ -831,7 +831,7 @@ entry_pass!(
     /// assemblies of different code, each carrying such an entry, stabilized to the same bytes,
     /// which the IL pass could then not read, so nothing capped a clean `normalized`
     /// (`docs/16-findings.md` §3.106). The set digest covers pass ids, not pass code
-    /// (`docs/19-distribution-and-lookup.md` §11, open question 1), so the narrower pass under the
+    /// (`docs/19-distribution-and-lookup.md` §11.1, D9), so the narrower pass under the
     /// old id would have re-derived old records differently under the digest they were signed with.
     DotnetAssemblyIdentity,
     "dotnet-assembly-identity-v2",
@@ -899,7 +899,7 @@ entry_pass!(
 // `-v2` because the form changed. The first kept each method's name, signature and IL and nothing
 // its tokens named, so a changed string literal, a MemberRef renamed under its token, a method's
 // flags, a catch clause's type or a P/Invoke's entry point all compared equal. The set digest
-// covers pass ids, not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a
+// covers pass ids, not pass code (`docs/19-distribution-and-lookup.md` §11.1, D9), so a
 // new form under the old id would have re-derived old records differently under the digest they
 // were signed with. A new id is a new set digest, and a record made under the old one is
 // re-derived under its archived set.
@@ -1322,7 +1322,7 @@ entry_pass!(
 /// is compared across the pass, and a comparison's field edits name RECORD as rewritten by it. A
 /// report published with field edits before that would re-derive with one it does not carry, under
 /// the set digest it was published with, and read as a disagreement. The set digest covers pass ids
-/// and not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a new id is
+/// and not pass code (`docs/19-distribution-and-lookup.md` §11.1, D9), so a new id is
 /// what sends such a record to its archived set.
 ///
 /// `-v3` because which `RECORD` it rewrites changed. It took the first member whose path ended
@@ -1506,7 +1506,7 @@ fn replace_line(text: &str, prefix: &str, replacement: &str) -> Option<String> {
 /// (`docs/16-findings.md` §3.106). A pass that needs text and is not given any has nothing it can
 /// normalize, and the bytes compare as they are. Each pass took a new id because its output on
 /// such a member changed, and the set digest covers pass ids, not pass code
-/// (`docs/19-distribution-and-lookup.md` §11, open question 1).
+/// (`docs/19-distribution-and-lookup.md` §11.1, D9).
 fn text_of(e: &Entry) -> Option<String> {
     String::from_utf8(e.body_bytes().ok()?.into_owned()).ok()
 }
@@ -2066,7 +2066,7 @@ fn sort_doc_members(body: &[u8]) -> Option<Vec<u8>> {
 // `applied` signed `bytesChanged: 0` for a body it had rewritten and no edit named the member it
 // had reconciled. Now it counts the bytes it wrote, and that count is signed, so the same id would
 // re-derive old statements to a different `applied` under the digest they were made with
-// (`docs/19-distribution-and-lookup.md` §11, open question 1).
+// (`docs/19-distribution-and-lookup.md` §11.1, D9).
 entry_pass!(
     NupkgDocMemberOrder,
     "nupkg-doc-member-order-v2",

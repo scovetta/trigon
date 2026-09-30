@@ -12,3 +12,6 @@
 
 # Worktrees a forked session creates. They are checkouts of this repository, not content of it.
 .claude/worktrees/
+
+# Python bytecode, written when a test or tool imports a script.
+__pycache__/

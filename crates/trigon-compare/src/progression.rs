@@ -53,7 +53,8 @@ pub struct Step {
     pub pass: Option<String>,
     /// Every difference left, counted as `rule@path` codes: members and the archive as a whole.
     pub differences: u32,
-    /// Members with at least one difference left.
+    /// Members with at least one difference left. A nested archive whose own framing or order
+    /// differs is one: `container:gzip.os@data.tar.gz` is a difference in `data.tar.gz`.
     pub members: u32,
     /// Members whose own bytes still differ.
     pub bodies: u32,
@@ -164,10 +165,16 @@ impl Tally {
             let Some((rule, path)) = code.split_once('@') else {
                 continue;
             };
+            // An archive-level code carries a path only inside a nested archive, and the path is
+            // the member that holds it: when `gzip-meta` clears a gem's inner gzip header, what it
+            // closed is `data.tar.gz`. A member but not a body, because what differs is how its
+            // contents are framed or ordered.
             let member_level = rule == "body"
                 || rule == "body-unreadable"
                 || rule.starts_with("entry:")
-                || rule.starts_with("member-only-in-");
+                || rule.starts_with("member-only-in-")
+                || rule.starts_with("container:")
+                || rule == "entry-order";
             if member_level {
                 members.insert(path.to_string());
                 if rule.starts_with("body") {

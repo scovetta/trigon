@@ -58,6 +58,7 @@ fn identity(purl: &trigon_core::purl::CanonicalPurl) -> RunIdentity<'_> {
 fn evidence() -> EvidenceDigests<'static> {
     EvidenceDigests {
         stabilizer_set_manifest: Some("51d0"),
+        stabilizer_set_module: Some("9e04"),
         comparison: Some("3d88"),
         strategy: Some("b02f"),
         guard_manifest: Some("e5c9"),
@@ -132,6 +133,7 @@ fn a_v2_verdict_carries_every_field_docs_19_asks_for() {
     // 7. The evidence digests, the set manifest's file among them.
     for (key, digest) in [
         ("stabilizerSetManifest", "51d0"),
+        ("stabilizerSetModule", "9e04"),
         ("comparison", "3d88"),
         ("strategy", "b02f"),
         ("guardManifest", "e5c9"),
@@ -339,7 +341,12 @@ fn a_void_carries_why_and_the_facts_and_nothing_about_which_way_the_run_went() {
     ] {
         assert!(p.get(absent).is_none(), "a void carries `{absent}`: {p}");
     }
-    for absent in ["comparison", "rebuiltArtifact", "strategy"] {
+    for absent in [
+        "comparison",
+        "rebuiltArtifact",
+        "strategy",
+        "stabilizerSetModule",
+    ] {
         assert!(p["evidence"].get(absent).is_none(), "{absent}: {p}");
     }
 

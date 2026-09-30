@@ -18,6 +18,14 @@ pub enum LogError {
     #[error("{0}")]
     Malformed(String),
 
+    /// A repository that holds no log at all: no checkpoint in `log/` or in any numbered log
+    /// directory, none that could not be read, and nothing else in their place. A mistyped URL
+    /// and a repository nothing has been published to look like this. It cannot be read and says
+    /// nothing, so it is not lying; a checkpoint that is there and does not open is
+    /// [`LogError::Unverified`].
+    #[error("{0}")]
+    NoLog(String),
+
     /// A file the checkpoint's tree needs, and the log does not have.
     #[error(
         "`{path}` is missing, and the checkpoint's tree needs it. A clone that holds the \
@@ -108,7 +116,10 @@ impl LogError {
             | LogError::Equivocation { .. }
             | LogError::Rule(_)
             | LogError::Rotation(_) => true,
-            LogError::Malformed(_) | LogError::Missing { .. } | LogError::Io { .. } => false,
+            LogError::Malformed(_)
+            | LogError::NoLog(_)
+            | LogError::Missing { .. }
+            | LogError::Io { .. } => false,
         }
     }
 }
@@ -127,7 +138,9 @@ impl Classify for LogError {
             | LogError::Equivocation { .. }
             | LogError::Rule(_)
             | LogError::Rotation(_) => Fault::Bug,
-            LogError::Malformed(_) | LogError::Missing { .. } => Fault::Upstream,
+            LogError::Malformed(_) | LogError::NoLog(_) | LogError::Missing { .. } => {
+                Fault::Upstream
+            }
             LogError::Io { .. } => Fault::Infra,
         }
     }

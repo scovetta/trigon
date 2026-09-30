@@ -225,13 +225,15 @@ divergence, `2` something never checked or withdrawn, `3` a void or a result bel
 
 ### Try the whole loop
 
-`scripts/evidence-e2e.sh` runs the whole loop on one machine in a few minutes. It creates keys and a
-local evidence repository, rebuilds a package behind the mirror, confirms it with a second cold
-build, publishes the verdict, then checks it the way a consumer would, including two checks that
-must fail. It keeps everything it makes in `work/evidence-e2e/` for you to look through.
+`scripts/evidence-e2e.sh` runs the whole loop on one machine in a few minutes, for the package you
+name. It creates keys and a local evidence repository, rebuilds the package behind the mirror,
+confirms it with a second cold build, publishes the verdict, then checks it the way a consumer
+would, including two checks that must fail. It keeps everything it makes in `work/evidence-e2e/`
+for you to look through. The package has no default. `pkg:npm/wrappy@1.0.2` is small and
+reproduces behind the mirror, so start with that.
 
 ```
-cargo build -p trigon && scripts/evidence-e2e.sh
+cargo build -p trigon && scripts/evidence-e2e.sh pkg:npm/wrappy@1.0.2
 ```
 
 ---

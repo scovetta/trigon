@@ -24,6 +24,8 @@ use trigon_attest::{AttestationKey, LocalKey};
 use trigon_core::Match;
 use trigon_store::{ArtifactRef, CacheState, Environment, RunRecord, RunState, Store};
 
+mod set_module;
+
 const ORIGIN: &str = "example.com/trigon-evidence";
 const DISPUTES: &str = "https://example.com/trigon-evidence/issues";
 
@@ -85,15 +87,16 @@ impl World {
         w
     }
 
-    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel and the log key,
-    /// and `extra` after them.
+    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel, the log key and
+    /// the stabilizer-set module, and `extra` after them.
     fn config(&self, extra: &str) {
         std::fs::write(
             self.dir.join("home/.config/trigon/evidence.toml"),
             format!(
                 "[publish]\norigin = \"{ORIGIN}\"\ndisputes = \"{DISPUTES}\"\n\
-                 log_key = \"{}\"\n{extra}",
-                self.log_key.display()
+                 log_key = \"{}\"\nstabilizer_module = \"{}\"\n{extra}",
+                self.log_key.display(),
+                set_module::built().display()
             ),
         )
         .unwrap();
@@ -164,8 +167,9 @@ impl World {
             self.dir.join("home/.config/trigon/evidence.toml"),
             format!(
                 "[publish]\norigin = \"{origin}\"\ndisputes = \"{DISPUTES}\"\n\
-                 log_key = \"{}\"\n{extra}",
-                key.display()
+                 log_key = \"{}\"\nstabilizer_module = \"{}\"\n{extra}",
+                key.display(),
+                set_module::built().display()
             ),
         )
         .unwrap();
@@ -2117,8 +2121,9 @@ impl World {
             self.dir.join("home/.config/trigon/evidence.toml"),
             format!(
                 "[publish]\norigin = \"{origin}\"\ndisputes = \"{DISPUTES}\"\n\
-                 log_key = \"{}\"\n{extra}",
-                key.display()
+                 log_key = \"{}\"\nstabilizer_module = \"{}\"\n{extra}",
+                key.display(),
+                set_module::built().display()
             ),
         )
         .unwrap();
@@ -5520,5 +5525,311 @@ fn an_upload_that_loses_its_name_to_another_is_held_to_the_artifact() {
         "{said}"
     );
     assert!(w.run(&d).published.is_none());
+    assert_eq!(w.commits(), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The stabilizer-set module a verdict names (docs/09 §7.1)
+// ---------------------------------------------------------------------------------------------
+
+/// Every evidence file of the clone at `root` that holds `bytes`.
+fn evidence_holding(root: &Path, bytes: &[u8]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("evidence")];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if std::fs::read(&p).unwrap() == bytes {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// A verdict that names no stabilizer-set module is refused, saying how to build and configure
+/// one, and nothing is written; attested again with one, it is published with the module in
+/// `evidence/`, where a second record naming the same module finds it and it is written once. A
+/// void names none, and needs none.
+#[test]
+fn a_verdict_naming_no_module_is_refused_and_a_module_is_published_once() {
+    let w = World::new("module");
+    w.init(w.remote.to_str().unwrap());
+    std::fs::write(
+        w.dir.join("home/.config/trigon/evidence.toml"),
+        format!(
+            "[publish]\norigin = \"{ORIGIN}\"\ndisputes = \"{DISPUTES}\"\nlog_key = \"{}\"\n",
+            w.log_key.display()
+        ),
+    )
+    .unwrap();
+    let a = Package::new("a", false);
+    let (first, _) = pair(&w, &a, "aaaa");
+    let said = refused(&w.publish(&[&first]));
+    assert!(
+        said.contains("its verdict names no stabilizer-set module"),
+        "{said}"
+    );
+    assert!(said.contains("scripts/build-set-module.sh"), "{said}");
+    assert!(said.contains("[publish] stabilizer_module"), "{said}");
+    assert!(
+        said.contains(&format!("trigon attest {first} --stabilizer-module <file>")),
+        "{said}"
+    );
+    assert_eq!(w.commits(), 1, "a refusal writes nothing");
+
+    // A void publishes without one: it makes no claim to re-derive.
+    let open = Package::new("open", true);
+    let store = Store::local(&w.store).unwrap();
+    rt().block_on(attempt(
+        &store,
+        "1789000000-0be00001",
+        &open,
+        "ck1:open",
+        'a',
+        "2026-09-27T00:00:00Z",
+        "open",
+    ));
+    w.attest("1789000000-0be00001", &[]);
+    ok(&w.publish(&["1789000000-0be00001"]));
+
+    // With the module: published, the module beside the record, and once for two records.
+    w.config("");
+    w.attest(&first, &[]);
+    ok(&w.publish(&[&first]));
+    let b = Package::new("b", false);
+    let (second, _) = pair(&w, &b, "bbbb");
+    ok(&w.publish(&[&second]));
+    let module = std::fs::read(set_module::built()).unwrap();
+    let hex = set_module::sha256(&module);
+    let clone = w.clone_fresh("consumer");
+    assert_eq!(
+        evidence_holding(&clone, &module),
+        [clone.join(format!(
+            "evidence/sha256/{}/{}/{hex}",
+            &hex[..2],
+            &hex[2..4]
+        ))]
+    );
+    let repo = w.open(&clone);
+    for (p, id) in [(&a, &first), (&b, &second)] {
+        let found = repo.lookup(&Key::Digest {
+            algorithm: "sha256",
+            hex: p.sha256(),
+        });
+        let v = found.current().next().unwrap().verified().unwrap();
+        assert_eq!(v.statement.predicate["run"]["id"], id.as_str());
+        assert_eq!(
+            v.record.evidence["stabilizerSetModule"],
+            format!("sha256:{hex}")
+        );
+        let e = v
+            .evidence
+            .iter()
+            .find(|e| e.name == "stabilizerSetModule")
+            .unwrap();
+        assert_eq!(e.state, trigon_attest::evidence::EvidenceState::Matches);
+    }
+}
+
+/// The round trip the module exists for. A verdict made under a set no binary carries — its
+/// statements signed as they would have been, naming the module that implements that set — is
+/// published with the module, and a verifier re-derives it from the record through the module
+/// the record carries, held to the digest the verdict signs: consistent, exit 0. A module given
+/// with `--stabilizers` is held to the same digest, and another is refused before it runs, a check
+/// not made, exit 5. The module gone from the directory is a check not made, exit 5; other bytes in
+/// its place fail the record, exit 4, before anything runs.
+#[test]
+fn a_verdict_under_a_set_the_verifier_lacks_re_derives_through_the_module_it_published() {
+    let w = World::new("module-round-trip");
+    w.init(w.remote.to_str().unwrap());
+    let p = Package::new("a", false);
+    let (first, _) = pair(&w, &p, "aaaa");
+    let module = set_module::fake(set_module::RETIRED, b"stable");
+    set_module::retire(&w.store, &first, &attestation(), &module, b"stable");
+    ok(&w.publish(&[&first]));
+
+    let clone = w.clone_fresh("consumer");
+    let record = w.run(&first).published.unwrap().record;
+    let file = record_file(&clone, &record);
+    let upstream = w.dir.join(p.file());
+    std::fs::write(&upstream, &p.upstream).unwrap();
+    let rebuilt = w.dir.join("rebuilt.tgz");
+    std::fs::write(&rebuilt, &p.rebuilt).unwrap();
+    let vkey = w.vkey().to_string();
+    let key = attestation().public_hex();
+    let check = |extra: &[&str]| {
+        let mut args = vec![
+            "verify-attestation",
+            "--record",
+            file.to_str().unwrap(),
+            "--evidence",
+            clone.to_str().unwrap(),
+            "--log-vkey",
+            &vkey,
+            "--attestation-key",
+            &key,
+            "--rerun-comparison",
+            "--upstream",
+            upstream.to_str().unwrap(),
+            "--rebuild",
+            rebuilt.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        w.trigon(&args)
+    };
+    let out = check(&[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let hex = set_module::sha256(&module);
+    assert!(
+        said.contains(&format!(
+            "through the stabilizer-set module sha256:{hex} the record carries, which the verdict \
+             signs: this binary does not carry `tar-gzip@111111111111`; it names no commit it was \
+             built from"
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains("rederived normalized_with_caveats under tar-gzip@111111111111"),
+        "{said}"
+    );
+    assert!(said.contains("— consistent:"), "{said}");
+    assert!(
+        said.contains("report    unchecked: an archived set re-derives no report"),
+        "{said}"
+    );
+
+    let given = w.dir.join("given.wasm");
+    std::fs::write(&given, &module).unwrap();
+    let out = check(&["--stabilizers", given.to_str().unwrap()]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains(&format!(
+            "through the module given, sha256:{hex}, which the verdict signs"
+        )),
+        "{said}"
+    );
+    let other = w.dir.join("other.wasm");
+    std::fs::write(&other, set_module::fake(set_module::RETIRED, b"other")).unwrap();
+    let out = check(&["--stabilizers", other.to_str().unwrap()]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(5), "{said}");
+    assert!(
+        said.contains("is not the one this statement names"),
+        "{said}"
+    );
+    assert!(!said.contains("rederived"), "{said}");
+
+    let at = clone.join(format!(
+        "evidence/sha256/{}/{}/{hex}",
+        &hex[..2],
+        &hex[2..4]
+    ));
+    std::fs::remove_file(&at).unwrap();
+    let out = check(&[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(5), "{said}");
+    assert!(
+        said.contains(&format!(
+            "names the stabilizer-set module sha256:{hex} that re-derives it, which is not in \
+             this directory"
+        )),
+        "{said}"
+    );
+    assert!(said.contains("--stabilizers <file.wasm>"), "{said}");
+
+    std::fs::write(&at, set_module::fake(set_module::RETIRED, b"other")).unwrap();
+    let out = check(&[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(
+        said.contains("is not the bytes its statement signs"),
+        "{said}"
+    );
+    assert!(!said.contains("rederived"), "{said}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Runs moved between stores (`trigon runs export` and `import`)
+// ---------------------------------------------------------------------------------------------
+
+/// Two attempts made in two stores, on two machine ids, each exported and imported into one store,
+/// are the agreeing pair the gate releases there, and `attest` signs and `publish` publishes the
+/// imported run. The second store imports the first attempt before it makes its own, as a second
+/// machine confirming one does. Before the confirmation is imported, the gate withholds the first
+/// attempt, alone in the store, as awaiting it.
+#[test]
+fn attempts_made_in_two_stores_and_imported_into_one_are_published_there() {
+    let w = World::new("imported-pair");
+    w.init(w.remote.to_str().unwrap());
+    let p = Package::new("moved", false);
+    let path = |p: &Path| p.to_str().unwrap().to_string();
+    let (store_a, store_b) = (path(&w.dir.join("store-a")), path(&w.dir.join("store-b")));
+    let (file_a, file_b) = (path(&w.dir.join("a.tar")), path(&w.dir.join("b.tar")));
+    let (a, b) = ("1789000000-00e00001", "1789007200-00e00002");
+    let key = "ck1:moved";
+
+    // Machine A's attempt, exported; machine B imports it and confirms it on its own machine id.
+    rt().block_on(async {
+        let store = Store::local(Path::new(&store_a)).unwrap();
+        attempt(
+            &store,
+            a,
+            &p,
+            key,
+            'a',
+            "2026-09-27T00:00:00Z",
+            "mirror-only",
+        )
+        .await
+    });
+    ok(&w.trigon(&["runs", "export", a, "--store", &store_a, "--out", &file_a]));
+    ok(&w.trigon(&["runs", "import", &file_a, "--store", &store_b]));
+    rt().block_on(async {
+        let store = Store::local(Path::new(&store_b)).unwrap();
+        attempt(
+            &store,
+            b,
+            &p,
+            key,
+            'b',
+            "2026-09-27T02:00:00Z",
+            "mirror-only",
+        )
+        .await
+    });
+    ok(&w.trigon(&["runs", "export", b, "--store", &store_b, "--out", &file_b]));
+
+    // The first attempt alone, imported, is signed and withheld.
+    let said = ok(&w.trigon(&["runs", "import", &file_a, "--store", &path(&w.store)]));
+    assert!(
+        said.contains(&format!("{a}  pkg:npm/demo-moved@1.0.0")),
+        "{said}"
+    );
+    w.attest(a, &[]);
+    let said = refused(&w.publish(&[a]));
+    assert!(
+        said.contains("withholds it (awaiting_confirmation)"),
+        "{said}"
+    );
+
+    // With the confirmation imported beside it, as machine B recorded it, it publishes.
+    let said = ok(&w.trigon(&["runs", "import", &file_b, "--store", &path(&w.store)]));
+    assert!(said.contains("imported 1 of 1 run(s)"), "{said}");
+    assert_eq!(
+        w.run(b).host,
+        Some(format!("machine-id:{}", "b".repeat(64)))
+    );
+    assert_eq!(w.run(b).started, "2026-09-27T02:00:00Z");
+    let said = ok(&w.publish(&[a]));
+    assert!(
+        said.contains(&format!("logged    leaf 0: run {a}")),
+        "{said}"
+    );
+    assert!(w.run(a).published.is_some());
     assert_eq!(w.commits(), 2);
 }

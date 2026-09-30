@@ -284,6 +284,13 @@ overspending and reporting it afterwards.
 It does **not** set `no_cache` (§2.6). The confirmation attempt that ADR-0010 safeguard 1 requires
 does, because that is what B15 scoped the flag to.
 
+**A credential is `Authorization: Bearer <token>`**, the scheme in any case. A token this instance
+did not issue, or has revoked, is a 401 `unknown_token` and never the public. An `Authorization`
+header of any other scheme is read as no credential at all: `Basic` is what a password-protected
+proxy in front of the site sends, and it is addressed to the proxy, not to this API, so refusing it
+would refuse every read behind such a proxy. Its holder is not left guessing: `POST /v1/runs` answers
+401 `authentication_required`, and `GET /v1/me` answers `principal: null`.
+
 ### 5.3 Authorized — reviewer scope
 
 ```
@@ -532,7 +539,8 @@ after it, reading back a 4 ms interval where 50 ms was asked for.
 Not yet: `runs`, `verdicts` and `rollups` as specified. The `run` table here is the pointers-and-
 scalars row the outbox needs — id, target, ecosystem, state, outcome, terminal, fault, failure code,
 attempt, cache key, and the digest of the record — and the API still reads the object store. Row
-versions are a column and not yet a conditional update, so D7 is narrowed rather than closed.
+versions are a column, not yet compared: the one condition on an update is that a `done` row ignores
+a record of an earlier state, so D7 is narrowed rather than closed.
 
 **Stage 3 — `trigon-engine`, enforcement test first. BUILT (in part).** Cut `run_one` into leasable stages
 with a serialisable handoff (strategy, pinned source, and a guard manifest of digests only). Write
@@ -995,8 +1003,9 @@ anything that was not there.
 **The §4 tables, and D7.** `run` is the pointers-and-scalars row the outbox needs, not
 `10-scale.md` §4's `runs`/`verdicts`/`rollups`. The API still reads the object store, which is
 correct at this size and is the thing stage 2 was supposed to replace behind the same reader.
-`version` is a column and not yet a conditional update, so concurrent writers are narrowed rather
-than excluded.
+`version` is a column that no update compares yet, and the one condition on an update is that a
+`done` row ignores a record of an earlier state, so concurrent writers are narrowed rather than
+excluded.
 
 Everything else in §8 is built. §11's scope call is still the scope call: stages 4 and 5 are not
 M4, and the part of stage 4 that shipped is the cheap half — a token is a row and a scope is a

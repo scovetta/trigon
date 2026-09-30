@@ -18,16 +18,18 @@
 //!    divergences` is `refuse`; a run already logged; the second of two agreeing attempts whose
 //!    first is published; a verdict or void for an artifact with a current record it does not
 //!    supersede; a verdict without its falsifying command naming `[publish] origin`, or without the
-//!    dispute pointer `[publish] disputes` names; a record not signed by the attestation key the
-//!    log has now; where rebuilt artifacts are published, a verdict whose rebuilt artifact is over
-//!    GitHub's 2 GiB or is not the one it signs; and any record every client would refuse, checked
-//!    with the client's own `check_record` before it is written.
+//!    dispute pointer `[publish] disputes` names, or naming no stabilizer-set module; a record not
+//!    signed by the attestation key the log has now; where rebuilt artifacts are published, a
+//!    verdict whose rebuilt artifact is over GitHub's 2 GiB or is not the one it signs; and any
+//!    record every client would refuse, checked with the client's own `check_record` before it is
+//!    written.
 //! 3. Where `[publish] rebuilt_artifacts = "github-release"`, find or upload each verdict's rebuilt
 //!    artifact as the release asset `sha256-<hex>` ([`release`]), before anything that names one
 //!    is written; an asset a failed attempt uploaded is reused, and one a publication never commits
 //!    is harmless.
-//! 4. Write each record and its evidence, deduplicated; one leaf per record, in the order the runs
-//!    were named, at a time never earlier than the leaf before it; the tiles and bundles the append
+//! 4. Write each record and its evidence, deduplicated — a stabilizer-set module or a set manifest
+//!    is one file however many records name it; one leaf per record, in the order the runs were
+//!    named, at a time never earlier than the leaf before it; the tiles and bundles the append
 //!    writes, the partials it makes obsolete removed; each index file of every key of every new
 //!    record, derived from the log whole; and, with a divergence or a record superseding one, the
 //!    divergence feed, derived from the log whole too ([`feed`]).
@@ -1517,6 +1519,19 @@ fn runs(
         }
         if !void && let Err(why) = recourse(st, s) {
             refused.push(refuse(why));
+            continue;
+        }
+        // The module that re-derives the verdict once no binary carries its set: published with
+        // it, as the rest of its evidence is, and a verdict without one is not published. A void
+        // makes no claim to re-derive, and a withdrawal has no run.
+        if !void && trigon_attest::signed_set_module(st).is_none() {
+            refused.push(refuse(format!(
+                "its verdict names no stabilizer-set module, and a verdict is published with the \
+                 module that re-derives it once no binary carries its set (docs/09 §7.1). Build \
+                 one with `scripts/build-set-module.sh`, set `[publish] stabilizer_module` to the \
+                 file it prints, or pass it as `trigon attest {id} --stabilizer-module <file>`, \
+                 and attest the run again"
+            )));
             continue;
         }
         let envelopes: Vec<Envelope> = wanted

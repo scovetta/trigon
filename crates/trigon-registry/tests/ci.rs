@@ -1660,6 +1660,91 @@ async fn the_ci_recipe_builds_the_kind_of_artifact_the_run_is_about() {
     }
 }
 
+#[tokio::test]
+async fn a_workflow_that_built_only_the_other_kind_declines_and_still_gives_its_evidence() {
+    // `python -m build --wheel` in a run about the sdist never built the artifact under test, so
+    // the workflow cannot say how that was built. A recipe from it builds an sdist nobody built
+    // and displaces the heuristic's candidate with it. The interpreter it pinned is still true.
+    let python = Claim::ToolchainExact {
+        tool: "python".into(),
+        version: "3.12".into(),
+    };
+    for (name, command, about, built, wanted) in [
+        (
+            "wheel-only",
+            "python -m build --wheel",
+            Some("kind-1.2.3.tar.gz"),
+            "wheel",
+            "sdist",
+        ),
+        (
+            "sdist-only",
+            "python -m build -s",
+            Some("kind-1.2.3-py3-none-any.whl"),
+            "sdist",
+            "wheel",
+        ),
+        // Nothing chosen yet: the recipe would build a wheel, so the workflow has to have.
+        (
+            "sdist-only-unchosen",
+            "python -m build --sdist",
+            None,
+            "sdist",
+            "wheel",
+        ),
+        (
+            "uv-wheel-only",
+            "uv build --wheel",
+            Some("kind-1.2.3.tar.gz"),
+            "wheel",
+            "sdist",
+        ),
+    ] {
+        let text = PLAIN_RELEASE.replace(
+            "      - run: python -m build\n",
+            &format!("      - run: {command}\n"),
+        );
+        let (root, url, commit) = repo(name, &[Wf::Inline("release.yml", text.leak())], &[]);
+        let mut t = target(Ecosystem::PyPI, "kind", "1.2.3", &url, &commit);
+        t.about = about.map(ArtifactId::new);
+        let r = rung(&root).read(&t).await.unwrap();
+        assert!(r.candidate.is_none(), "{name}");
+        assert_eq!(
+            r.declined,
+            Some(Decline::WorkflowBuildsAnotherKind { built, wanted }),
+            "{name}"
+        );
+        assert!(
+            r.evidence.iter().any(|e| e.claim == python),
+            "{name}: {:?}",
+            r.evidence
+        );
+    }
+
+    // A job that builds both kinds, in one command or across two, built the one the run compares.
+    for (name, command) in [
+        ("both-flags", "python -m build --sdist --wheel"),
+        (
+            "both-commands",
+            "python -m build --wheel\n      - run: python -m build --sdist",
+        ),
+    ] {
+        let text = PLAIN_RELEASE.replace(
+            "      - run: python -m build\n",
+            &format!("      - run: {command}\n"),
+        );
+        let (root, url, commit) = repo(name, &[Wf::Inline("release.yml", text.leak())], &[]);
+        let mut t = target(Ecosystem::PyPI, "kind", "1.2.3", &url, &commit);
+        t.about = Some(ArtifactId::new("kind-1.2.3.tar.gz"));
+        let r = rung(&root).read(&t).await.unwrap();
+        let c = r
+            .candidate
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: {:?}", r.declined));
+        assert_eq!(params(&c.strategy, "build")["kind"], "sdist", "{name}");
+    }
+}
+
 const UV_RELEASE: &str = r#"
 name: Release
 on:
@@ -2378,8 +2463,34 @@ async fn the_registry_moment_and_the_backend_the_wheel_names_reach_the_recipe() 
         "{:?}",
         c.assumptions
     );
-    // No backend was read, so nothing constrains the build environment.
-    assert_eq!(params(&c.strategy, "build")["constraints"], "");
+    // No backend was read, and the build is still pointed at the constraints file: it carries the
+    // exclusion of the artifact under test, which every PyPI recipe is given.
+    assert_eq!(
+        params(&c.strategy, "build")["constraints"],
+        format!("{}/constraints.txt", trigon_strategy::VENV)
+    );
+}
+
+#[tokio::test]
+async fn a_ci_recipe_keeps_the_artifact_under_test_out_of_its_own_build_as_the_heuristic_does() {
+    // A package that is part of the machinery that builds packages — `packaging`,
+    // `pyproject-hooks` — makes pip ask for the very version under test when the frontend is
+    // installed. The heuristic excludes it and always points the build at the constraints file
+    // that carries the exclusion; the CI lowering kept the shape from before that, with no
+    // exclusion and no constraints unless a backend was read. It sits above the heuristic and
+    // displaces its candidate, so its recipe undid the fix for every package it answered.
+    let r = read_pypi("kind", &[Wf::Inline("release.yml", PLAIN_RELEASE)], &[]).await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    let deps = params(&c.strategy, "deps");
+    assert!(!deps.contains_key("build_backend"), "the premise: {deps:?}");
+    assert_eq!(deps["exclude_self"], "kind!=1.2.3");
+    assert_eq!(
+        params(&c.strategy, "build")["constraints"],
+        "/trigon/deps/constraints.txt"
+    );
 }
 
 #[tokio::test]

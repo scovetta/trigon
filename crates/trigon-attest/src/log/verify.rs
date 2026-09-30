@@ -1345,19 +1345,27 @@ fn start_of(repo: &Path, pinned: &LogVkey, numbered: &[(u64, String)]) -> Result
         }
     }
     let Some(max) = opened.iter().map(|(_, _, c)| c.size()).max() else {
-        return Err(first_error.unwrap_or_else(|| {
-            LogError::Unverified(format!(
-                "no log in {} has the origin `{}` its pinned key names ({}). Check that the key \
-                 configured for this source is this repository's",
-                repo.display(),
-                pinned.origin(),
-                if seen.is_empty() {
-                    "it has no `log/checkpoint`".to_string()
-                } else {
-                    seen.join("; ")
-                }
-            ))
-        }));
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+        // No checkpoint anywhere, and none that could not be read: not a log that fails to verify
+        // but no log at all, which is what a mistyped URL or an empty repository serves. It says
+        // nothing, so it cannot be lying, and a mirror serving it is set aside as unreadable
+        // rather than refusing the source. A checkpoint that is there is held to the key.
+        if seen.is_empty() {
+            return Err(LogError::NoLog(format!(
+                "there is no log in {}: it has no `log/checkpoint`, and no numbered log directory \
+                 holds a checkpoint",
+                repo.display()
+            )));
+        }
+        return Err(LogError::Unverified(format!(
+            "no log in {} has the origin `{}` its pinned key names ({}). Check that the key \
+             configured for this source is this repository's",
+            repo.display(),
+            pinned.origin(),
+            seen.join("; ")
+        )));
     };
     let (newest, older): (Vec<_>, Vec<_>) =
         opened.into_iter().partition(|(_, _, c)| c.size() == max);
@@ -1368,7 +1376,25 @@ fn start_of(repo: &Path, pinned: &LogVkey, numbered: &[(u64, String)]) -> Result
     })
 }
 
-/// The log a chain starts at: the first directory holding the newest checkpoint the pinned key
+/// Whether `repo` holds no log at all, as [`verify_source`] finds it before returning
+/// [`LogError::NoLog`]: no `log/checkpoint`, no numbered log directory holding a checkpoint, and
+/// none that could not be read. Asked with no key, so nothing is opened: a checkpoint that is
+/// there, whatever it says, is a log, and one that cannot be read is not known to be absent.
+pub fn holds_no_log(repo: &Path) -> bool {
+    let Ok(numbered) = numbered_logs(&repo.join("log")) else {
+        return false;
+    };
+    std::iter::once("log".to_string())
+        .chain(numbered.into_iter().map(|(_, dir)| dir))
+        .all(|dir| {
+            matches!(
+                DirFiles::in_repository(repo, &dir).read(CHECKPOINT, CHECKPOINT_LIMIT),
+                Ok(None)
+            )
+        })
+}
+
+/// The log a chain starts at:the first directory holding the newest checkpoint the pinned key
 /// opens whose files verify whole, with its number.
 ///
 /// Every such directory holds one signed tree, so whichever of them verifies is the log, and one

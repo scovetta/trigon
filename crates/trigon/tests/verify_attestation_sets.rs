@@ -13,6 +13,8 @@ use std::process::{Command, Output};
 
 use base64::Engine as _;
 
+mod set_module;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_trigon")
 }
@@ -283,6 +285,273 @@ fn a_stabilizer_module_needs_the_build_that_can_run_one() {
         !String::from_utf8_lossy(&out.stdout).contains("claim holds"),
         "it checked the claim anyway"
     );
+}
+
+/// Edit the claim so it was made under a set no binary carries, `11…11`, whose module `module`
+/// stabilizes every artifact to `stable`, and sign that module as its stabilizer-set module.
+fn under_a_retired_set(c: &Claim, module: &[u8], stable: &[u8]) {
+    let stable = set_module::sha256(stable);
+    let module = set_module::sha256(module);
+    edit(&c.bundle, |st| {
+        let p = &mut st["predicate"];
+        p["stabilizerSet"]["digest"]["sha256"] = "11".repeat(32).into();
+        p["stabilized"]["upstream"]["sha256"] = stable.clone().into();
+        p["stabilized"]["rebuild"]["sha256"] = stable.clone().into();
+        p["evidence"] = serde_json::json!({ "stabilizerSetModule": { "sha256": module } });
+    });
+}
+
+/// A claim made under a set this binary does not carry is re-derived through the module the
+/// verdict names, once the module given is that one by its digest. The claim is `normalized` and
+/// its stabilized forms re-derive equal, which a module cannot show to be `normalized` rather than
+/// `normalized_with_caveats`: consistent, exit 0, and never promoted. Without the module it says
+/// where to get it; with another module, whatever set digest it reports, nothing runs.
+#[cfg(feature = "wasm")]
+#[test]
+fn a_claim_under_a_set_this_binary_lacks_is_re_derived_through_the_module_it_signs() {
+    let d = dir("module-retired");
+    let c = claim(&d);
+    let module = set_module::fake([0x11; 32], b"stable");
+    under_a_retired_set(&c, &module, b"stable");
+    let path = d.join("retired.wasm");
+    std::fs::write(&path, &module).unwrap();
+
+    let out = rerun(&c, &["--stabilizers".as_ref(), path.as_os_str()]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains(&format!(
+            "module    through the module given, sha256:{}, which the verdict signs",
+            set_module::sha256(&module)
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("as its stabilizer-set module; it names no commit it was built from"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "rederived normalized_with_caveats under tar-gzip@111111111111, and the statement \
+             claims normalized — consistent: the stabilized forms are equal, as the claim says; an \
+             archived set cannot show which tier of pass fired, so the claim's strength is not \
+             re-derived"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("does NOT hold"), "{text}");
+
+    let out = rerun(
+        &c,
+        &[
+            "--stabilizers".as_ref(),
+            path.as_os_str(),
+            "--output".as_ref(),
+            "json".as_ref(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let r = &doc["rederived"];
+    assert_eq!(r["holds"], false, "{doc}");
+    assert_eq!(r["consistent"], true, "{doc}");
+    assert_eq!(r["actual"], "normalized_with_caveats", "{doc}");
+    assert!(
+        r["module"].as_str().is_some_and(|m| m.contains("sha256:")),
+        "{doc}"
+    );
+
+    // No module: a bundle carries no evidence, so it is asked for, and nothing is re-derived under
+    // this binary's own set instead.
+    let out = rerun(&c, &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("A bundle carries no evidence: pass the module with --stabilizers"),
+        "{err}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("rederived"));
+
+    // Another module, reporting the same set: refused by its digest, before it runs. The bundle
+    // form exits 1 for it, as for anything that stops it.
+    let other = d.join("other.wasm");
+    std::fs::write(&other, set_module::fake([0x11; 32], b"other")).unwrap();
+    let out = rerun(&c, &["--stabilizers".as_ref(), other.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the stabilizer-set module given is not the one this statement names"),
+        "{err}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("rederived"));
+}
+
+/// The module line says which commit the module says it was built from: where a verifier who
+/// would rather rebuild the module than run it starts. It is the module's word, and an answer that
+/// is not a commit is said to be one and never printed; the claim is re-derived either way.
+#[cfg(feature = "wasm")]
+#[test]
+fn the_module_line_says_which_commit_the_module_names() {
+    let d = dir("module-commit");
+    let c = claim(&d);
+    let commit = format!("{}.dirty", "b".repeat(40));
+    let path = d.join("retired.wasm");
+    for (named, says) in [
+        (
+            commit.as_str(),
+            format!(
+                "which the verdict signs as its stabilizer-set module; it says it was built from \
+                 commit {commit}\n"
+            ),
+        ),
+        (
+            "\x1b[31mred",
+            "which the verdict signs as its stabilizer-set module; the module names the commit it \
+             was built from as something that is not a commit\n"
+                .to_string(),
+        ),
+    ] {
+        let module = set_module::fake_naming([0x11; 32], b"stable", Some(named));
+        under_a_retired_set(&c, &module, b"stable");
+        std::fs::write(&path, &module).unwrap();
+        let out = rerun(&c, &["--stabilizers".as_ref(), path.as_os_str()]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{named:?}: {text}");
+        assert!(text.contains(&says), "{named:?}: {text}");
+        assert!(text.contains("— consistent:"), "{named:?}: {text}");
+        assert!(!text.contains('\x1b'), "{named:?}: {text}");
+    }
+}
+
+/// `--stabilizers <module>` is run whatever this binary carries, which is how a module is checked
+/// while the set it implements can still be compared with it; a statement that signs no module
+/// binds none, and the output says the module is held only to its own word and the digests. One
+/// that signs another module refuses this one.
+#[cfg(feature = "wasm")]
+#[test]
+fn a_module_given_is_run_whatever_this_binary_carries() {
+    let d = dir("module-forced");
+    let c = claim(&d);
+    let module = set_module::built();
+    let hex = set_module::sha256(&std::fs::read(&module).unwrap());
+    let out = rerun(&c, &["--stabilizers".as_ref(), module.as_os_str()]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains(&format!(
+            "the module given, sha256:{hex}. The statement signs no module, so this one is held \
+             only to the set digest it reports of itself"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("— consistent:"), "{text}");
+
+    edit(&c.bundle, |st| {
+        st["predicate"]["evidence"] =
+            serde_json::json!({ "stabilizerSetModule": { "sha256": hex.clone() } });
+    });
+    let out = rerun(&c, &["--stabilizers".as_ref(), module.as_os_str()]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("which the verdict signs"), "{text}");
+
+    edit(&c.bundle, |st| {
+        st["predicate"]["evidence"] =
+            serde_json::json!({ "stabilizerSetModule": { "sha256": "ab".repeat(32) } });
+    });
+    let out = rerun(&c, &["--stabilizers".as_ref(), module.as_os_str()]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not the one this statement names"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The verifier build carries no module host. Meeting a verdict under a set it does not carry that
+/// names the module implementing it, it says exactly what would run it, and checks nothing under
+/// its own set instead.
+#[cfg(not(feature = "wasm"))]
+#[test]
+fn the_verifier_says_how_to_run_the_module_a_verdict_names() {
+    let d = dir("module-verifier");
+    let c = claim(&d);
+    under_a_retired_set(&c, &set_module::fake([0x11; 32], b"stable"), b"stable");
+    let out = rerun(&c, &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("which this binary does not carry, and it names the stabilizer-set module"),
+        "{err}"
+    );
+    assert!(err.contains("This build cannot run a module"), "{err}");
+    assert!(
+        err.contains("cargo build -p trigon --no-default-features --features wasm"),
+        "{err}"
+    );
+    assert!(
+        err.contains("the full build, `cargo build -p trigon`"),
+        "{err}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("rederived"));
+}
+
+/// A verdict under a set this binary does not carry, naming its module, where the module cannot be
+/// run here — a bundle carries none, and the verifier build runs none — is refused saying how to
+/// run it; and a manifest given for the set still says what the set held first, as it does for a
+/// verdict that names no module, so the refusal is not a dead end either.
+#[test]
+fn a_manifest_still_says_what_the_set_held_where_its_module_cannot_run() {
+    let d = dir("module-described");
+    let c = claim(&d);
+    let old = retired_set();
+    let module = set_module::sha256(b"a module this bundle does not carry");
+    edit(&c.bundle, |st| {
+        st["predicate"]["stabilizerSet"]["digest"]["sha256"] = old.digest.clone().into();
+        st["predicate"]["evidence"] =
+            serde_json::json!({ "stabilizerSetModule": { "sha256": module.clone() } });
+    });
+    let manifest = d.join("retired.json");
+    std::fs::write(&manifest, serde_json::to_vec(&old).unwrap()).unwrap();
+
+    let out = rerun(&c, &["--stabilizers".as_ref(), manifest.as_os_str()]);
+    assert!(
+        !out.status.success(),
+        "describing the set is not checking it"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("rederived"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the claim was made under `tar-gzip`, which contained:"),
+        "{err}"
+    );
+    for m in &old.members {
+        assert!(
+            err.lines()
+                .any(|l| l.split_whitespace().next() == Some(m.id.as_str())),
+            "{} is not listed:\n{err}",
+            m.id
+        );
+    }
+    assert!(
+        err.contains(&format!(
+            "which this binary does not carry, and it names the stabilizer-set module \
+             sha256:{module} that implements it"
+        )),
+        "{err}"
+    );
+
+    // Without the manifest, the refusal alone: nothing is described from a file nobody gave.
+    let out = rerun(&c, &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("which contained"), "{err}");
+    assert!(err.contains(&format!("sha256:{module}")), "{err}");
 }
 
 /// Re-deriving needs both artifacts, and one alone is refused rather than half-checked.

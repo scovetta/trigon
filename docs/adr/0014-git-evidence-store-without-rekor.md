@@ -13,7 +13,11 @@ is an explicit `trigon publish` rather than automatic, and this names where and 
 published and how it is corrected; it corrects safeguard 2 on disagreeing attempts, and narrows
 safeguard 1 to verdicts, so that a void is publishable on one attempt (Decision 6); and safeguard 4
 becomes whatever docs/19 D7 decides, with divergences refused until then. The rest of ADR-0011's
-keyed-signing half stands.
+keyed-signing half stands. Amended on 2026-09-30: the Sigstore bridge that "Interoperability", in
+"What this costs", leaves to be built if npm or PyPI ever take third-party attestations in
+Sigstore's shape is dropped, because it buys nothing. No part of Sigstore is planned (docs/19 §9).
+Amended on the same day: Decision 10's rule that each docs/19 §11 decision is a setting holds for
+the decisions still open, and D9 to D11, decided then, have none (Decision 10 carries the note).
 
 The design this records, and the build plan, are in
 [`19-distribution-and-lookup.md`](../19-distribution-and-lookup.md). Accepting this ADR was phase 0b
@@ -81,6 +85,9 @@ of that plan, and came before anything was removed.
     location `git` accepts: an HTTPS, SSH, `git://` or `file://` URL, or a local path. Credentials
     are `git`'s own. Every decision in docs/19 §11 that changes behaviour is a setting with a
     conservative default, so the code does not wait on the decision.
+    *(Amended on 2026-09-30: this holds for the decisions still open. D9 to D11, decided that day
+    (docs/19 §11.1), have no setting: each is built as decided, and for D9 `publish` refuses a
+    verdict that names no stabilizer-set module.)*
 
 ## Why Rekor goes
 
@@ -217,6 +224,8 @@ operate, copied by every consumer so that a rewrite is detectable.**
 - **Interoperability.** Tools that expect a Sigstore bundle, or an OCI referrer, cannot check our
   records without our verifier. If npm or PyPI ever accept third-party attestations in Sigstore's
   shape, that bridge has to be built then.
+  *(Amended on 2026-09-30: the bridge is dropped and will not be built, then or later, because it
+  buys nothing.)*
 - **Safeguard 4 has no channel yet.** ADR-0010's maintainer notification needs a feed maintainers
   subscribe to — which the repository makes cheap — or an email-sending account, which is
   infrastructure. Until docs/19 D7 decides, divergences are not published.

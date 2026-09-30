@@ -7,8 +7,8 @@ use std::cmp::Ordering;
 use std::path::Path;
 
 use trigon_attest::log::{
-    Leaf, LogEndLeaf, LogError, Successor, VerifiedLog, check_accepted, compare_chains, same_log,
-    verify_continuation, verify_source,
+    Leaf, LogEndLeaf, LogError, Successor, VerifiedLog, check_accepted, compare_chains,
+    holds_no_log, same_log, verify_continuation, verify_source,
 };
 
 use crate::common::{SUCCESSOR, T0, Writer, heartbeat, heartbeats, log_key, successor_key};
@@ -272,21 +272,43 @@ fn a_successor_in_the_same_repository_is_not_followed_as_another() {
     );
 }
 
-/// A directory with no log in it is no source, and says what it looked for.
+/// A directory with no log in it is no source, and says what it looked for. With no checkpoint
+/// anywhere it cannot be read, and is not failing verification: a mistyped URL, or a repository
+/// nothing has been published to, says nothing and so cannot be lying. `holds_no_log`, asked with
+/// no key before trusting one on first use, says so of exactly the same directories.
 #[test]
 fn a_repository_with_no_log_is_refused_saying_what_it_lacks() {
     let tmp = tempfile::tempdir().unwrap();
     let e = verify_source(tmp.path(), &log_key().vkey(), None).unwrap_err();
-    assert!(matches!(e, LogError::Unverified(_)), "{e}");
+    assert!(matches!(e, LogError::NoLog(_)), "{e}");
+    assert!(!e.fails_verification(), "{e}");
     assert!(e.to_string().contains("it has no `log/checkpoint`"), "{e}");
+    assert!(holds_no_log(tmp.path()));
+    // A numbered directory with no checkpoint in it is no log either.
+    std::fs::create_dir_all(tmp.path().join("log/1/tile")).unwrap();
+    let e = verify_source(tmp.path(), &log_key().vkey(), None).unwrap_err();
+    assert!(matches!(e, LogError::NoLog(_)), "{e}");
+    assert!(holds_no_log(tmp.path()));
+    std::fs::remove_dir_all(tmp.path().join("log")).unwrap();
+
+    // A checkpoint in a numbered directory alone is a log, whoever's it is.
+    let mut other = Writer::init(&tmp.path().join("log/1"), successor_key());
+    other.append(&heartbeats(T0, 1));
+    assert!(!holds_no_log(tmp.path()));
+    let e = verify_source(tmp.path(), &log_key().vkey(), None).unwrap_err();
+    assert!(!matches!(e, LogError::NoLog(_)), "{e}");
+    std::fs::remove_dir_all(tmp.path().join("log")).unwrap();
 
     // Where there are logs and none is the pinned one's, each is said as what it is.
     std::fs::create_dir_all(tmp.path().join("log")).unwrap();
     std::fs::write(tmp.path().join("log/checkpoint"), b"not a note\n").unwrap();
+    assert!(!holds_no_log(tmp.path()));
     let mut other = Writer::init(&tmp.path().join("log/1"), successor_key());
     other.append(&heartbeats(T0, 1));
     let e = verify_source(tmp.path(), &log_key().vkey(), None).unwrap_err();
+    // A checkpoint that is there is held to the key: this fails verification, as before.
     assert!(matches!(e, LogError::Unverified(_)), "{e}");
+    assert!(e.fails_verification(), "{e}");
     let said = e.to_string();
     assert!(said.contains("`log` has no readable checkpoint"), "{said}");
     assert!(

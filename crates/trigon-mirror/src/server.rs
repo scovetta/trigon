@@ -1113,9 +1113,11 @@ async fn nuget_route(
         moment: moment.clone(),
     };
     // The authority this mirror is reachable at, so the documents it serves point back at it —
-    // with the moment spelled as the client spelled it, so a URL it composes onto one of these
-    // is a URL it already recognises.
-    let base = format!("http://{via}/-nuget/{raw}");
+    // with the moment normalized, as the Cargo and artifact routes write it, so every URL served
+    // and every transcript row names the moment the filter applied rather than the client's
+    // spelling of it: an offset or a fraction `normalize` drops is not in them. A client follows
+    // an `@id` as written and never compares it with the URL it first asked for.
+    let base = format!("http://{via}/-nuget/{moment}");
 
     if tail == "index.json" {
         mirror.seen.note_moment(moment);

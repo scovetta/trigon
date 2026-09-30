@@ -426,6 +426,41 @@ fn a_difference_inside_a_nested_archive_is_named_through_its_container() {
     );
 }
 
+#[test]
+fn a_gz_member_only_one_side_descended_into_is_compared_by_the_bytes_it_stabilizes_to() {
+    // One side's `.gz` parsed and the other's did not (`NestedParseFailed`), so one member is an
+    // archive and the other is bytes. Both can be read: an archive nothing changed contributes the
+    // bytes it arrived as. `body-unreadable` said that nobody could look, which was not so.
+    let h = GzipHeader::default();
+    let nested = gem(&[("lib/x.rb", b"one")], &h);
+    assert!(
+        matches!(nested.entries[0].body, Body::Nested { .. }),
+        "the premise: one side was descended into"
+    );
+    let inline = |bytes: Vec<u8>| {
+        let mut a = gem(&[("lib/x.rb", b"one")], &h);
+        a.entries[0].body = Body::Inline(bytes);
+        a
+    };
+    let other = gz(&h, &tar_of(&[("lib/x.rb", b"ONE")]));
+    assert_eq!(
+        signature(&nested, &inline(other.clone())),
+        set(&["body@data.tar.gz"])
+    );
+    assert_eq!(
+        signature(&inline(other), &nested),
+        set(&["body@data.tar.gz"]),
+        "whichever side it is that descended"
+    );
+
+    let arrived = gz(&h, &tar_of(&[("lib/x.rb", b"one")]));
+    assert_eq!(
+        signature(&nested, &inline(arrived)),
+        set(&[]),
+        "the same bytes either way are the same member"
+    );
+}
+
 // --- deviation patterns ---------------------------------------------------------------------------
 
 #[test]

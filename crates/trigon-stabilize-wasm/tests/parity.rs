@@ -5,15 +5,20 @@
 //! produced a second, unrelated one. `docs/13-roadmap.md` makes the equality a milestone criterion
 //! for exactly that reason.
 //!
-//! Skipped unless the module has been built, because it needs a second toolchain target:
+//! The module needs a second toolchain target, and these fail, saying how to build it, where it has
+//! not been built into the target directory the tests are built in. The script builds it as it is
+//! published, reproducibly, naming the commit it was built from:
 //!
 //! ```text
-//! cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+//! scripts/build-set-module.sh
 //! cargo test -p trigon-stabilize-wasm --features host
 //! ```
 //!
-//! Skipping loudly rather than silently: a parity test that quietly passes when it did not run is
-//! worse than no parity test, because it is a green tick standing in for an unchecked claim.
+//! The one test about the script's own module, the commit it names, runs the script itself, into a
+//! target directory of its own: the module beside the tests is whichever build of it ran last.
+//!
+//! Failing loudly rather than skipping silently: a parity test that quietly passes when it did not
+//! run is worse than no parity test, because it is a green tick standing in for an unchecked claim.
 
 #![cfg(feature = "host")]
 
@@ -23,9 +28,14 @@ use std::path::PathBuf;
 use trigon_archive::Limits;
 use trigon_core::Format;
 
+/// The module `scripts/build-set-module.sh` builds, in the target directory this test was built in:
+/// `CARGO_TARGET_DIR`'s where it is set, as the script's is, and not the checkout's `target/`,
+/// which may hold a module built from other sources.
 fn module() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-unknown-unknown/release/trigon_stabilize_wasm.wasm");
+    let exe = std::env::current_exe().ok()?;
+    // <target>/<profile>/deps/<this test>
+    let target = exe.parent()?.parent()?.parent()?;
+    let p = target.join("wasm32-unknown-unknown/release/trigon_stabilize_wasm.wasm");
     p.exists().then_some(p)
 }
 
@@ -72,9 +82,9 @@ fn wheel(members: &[(&str, &[u8])]) -> Vec<u8> {
 fn the_archived_set_and_the_compiled_one_agree_byte_for_byte() {
     let Some(path) = module() else {
         panic!(
-            "the stabilizer module is not built. Run:\n  cargo build -p trigon-stabilize-wasm \
-             --target wasm32-unknown-unknown --release\nA parity test that skips silently is a \
-             green tick standing in for an unchecked claim."
+            "the stabilizer module is not built. Run:\n  scripts/build-set-module.sh\nwith the \
+             same CARGO_TARGET_DIR as the tests. A parity test that skips silently is a green \
+             tick standing in for an unchecked claim."
         );
     };
     let mut archived = trigon_stabilize_wasm::ArchivedSet::load(&path).unwrap();
@@ -131,6 +141,83 @@ fn the_module_reports_the_set_digest_the_native_build_computes() {
     }
 }
 
+/// The module the script builds names the commit it was built from, which is where a verifier who
+/// rebuilds it to compare digests starts; built outside a git checkout, it names none.
+///
+/// The script is run here, into a target directory no other build uses. A plain `cargo build` of
+/// the module names no commit, and the module beside the tests is whichever build of it ran last,
+/// so reading that one tested the order the builds ran in rather than the script: it failed after
+/// any plain build of the module. The first run compiles the module, about ten seconds; after that
+/// cargo has nothing to do until a source or the commit changes.
+#[test]
+fn the_module_the_script_builds_names_the_commit_it_was_built_from() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("build-set-module");
+    let built = std::process::Command::new("bash")
+        .arg(root.join("scripts/build-set-module.sh"))
+        .env("CARGO_TARGET_DIR", &target)
+        // From what cargo has already fetched: a test does not touch the network.
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("bash runs");
+    let said = String::from_utf8_lossy(&built.stdout).into_owned();
+    assert!(
+        built.status.success(),
+        "scripts/build-set-module.sh failed:\n{said}{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let path = target.join("wasm32-unknown-unknown/release/trigon_stabilize_wasm.wasm");
+    assert!(
+        said.contains(&format!("module  {}\n", path.display())),
+        "{said}"
+    );
+
+    // Asked as the script asks it, with nothing in the environment pointing git elsewhere.
+    let top = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            PathBuf::from(String::from_utf8(o.stdout).ok()?.trim())
+                .canonicalize()
+                .ok()
+        });
+    let in_a_checkout = top.as_deref() == Some(root.as_path());
+    let named = trigon_stabilize_wasm::ArchivedSet::load(&path)
+        .unwrap()
+        .source_commit()
+        .unwrap();
+    assert_eq!(
+        named.is_some(),
+        in_a_checkout,
+        "the module the script built at {} names {named:?}, and {} a git checkout",
+        path.display(),
+        if in_a_checkout {
+            "this is"
+        } else {
+            "this is not"
+        }
+    );
+    // The commit it names is the one the script says it named.
+    let printed = said
+        .lines()
+        .find_map(|l| l.strip_prefix("commit  "))
+        .unwrap_or_else(|| panic!("the script printed no commit: {said}"));
+    match &named {
+        Some(named) => assert_eq!(printed, named, "{said}"),
+        None => assert!(printed.starts_with("none: "), "{said}"),
+    }
+}
+
 #[test]
 fn a_module_implementing_a_different_set_is_refused() {
     let Some(path) = module() else {
@@ -153,6 +240,13 @@ fn an_unparseable_artifact_is_a_refusal_rather_than_a_plausible_answer() {
         .stabilize("wheel", Format::Zip, b"not a zip at all")
         .unwrap_err();
     assert!(e.to_string().contains("refused"), "{e}");
+    // The zero merges running out of memory in with the rest, and the refusal says so: an artifact
+    // that expands past what a module can address is refused this way, not as malformed alone.
+    assert!(
+        e.to_string()
+            .contains("or ran out of the memory a module can address"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -207,6 +301,51 @@ fn a_file_that_is_not_wasm_at_all_fails_with_its_path() {
         Err(e) => format!("{e:#}"),
     };
     assert!(text.contains("not-a-module.wasm"), "{text}");
+}
+
+/// A module loaded from its bytes is the module its file holds. It is the form `trigon attest` and
+/// `verify-attestation` load, since each runs exactly the bytes it held to a digest; reading the
+/// file again to load it would run bytes nobody hashed. Bytes that are no module are refused as
+/// such, and so is a module that wants an import, whichever way it is loaded.
+#[test]
+fn a_module_loaded_from_its_bytes_is_the_module_its_file_holds() {
+    let Some(path) = module() else {
+        panic!("the stabilizer module is not built; see the sibling test");
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let mut from_file = trigon_stabilize_wasm::ArchivedSet::load(&path).unwrap();
+    let mut from_bytes = trigon_stabilize_wasm::ArchivedSet::from_bytes(&bytes).unwrap();
+    for profile in trigon_stabilize::all_profiles() {
+        assert_eq!(
+            from_bytes.digest(profile).unwrap(),
+            from_file.digest(profile).unwrap(),
+            "{profile}"
+        );
+    }
+    let artifact = tar_gz(1_700_000_000, 501);
+    assert_eq!(
+        from_bytes
+            .stabilize("tar-gzip", Format::TarGz, &artifact)
+            .unwrap(),
+        from_file
+            .stabilize("tar-gzip", Format::TarGz, &artifact)
+            .unwrap()
+    );
+
+    let refused = |bytes: &[u8]| match trigon_stabilize_wasm::ArchivedSet::from_bytes(bytes) {
+        Ok(_) => panic!("{bytes:?} loaded as a module"),
+        Err(e) => format!("{e:#}"),
+    };
+    let e = refused(b"{\"id\":\"wheel\"}");
+    assert!(e.contains("WebAssembly module"), "{e}");
+    #[rustfmt::skip]
+    let with_import: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+        0x02, 0x07, 0x01, 0x01, b'e', 0x01, b'f', 0x00, 0x00,
+    ];
+    let e = refused(with_import);
+    assert!(e.contains("pure by construction"), "{e}");
 }
 
 /// A module that predates a profile must say so, rather than blame the artifact.

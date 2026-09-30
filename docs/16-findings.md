@@ -1621,8 +1621,9 @@ as written.
 ## 4b. A core module where the design says component
 
 `docs/09-attestations.md` §7.1 specifies stabilizer sets shipping as **WASM components**, instantiated
-under `wasmtime`. What ships is a **core module** for `wasm32-unknown-unknown`, with a four-function
-ABI over a byte buffer.
+under `wasmtime`. What ships is a **core module** for `wasm32-unknown-unknown`, with an ABI of three
+functions over its exported memory, and a fourth appended since that names the commit the module
+was built from (§3.109).
 
 The component model means `wasm32-wasip2`, WIT definitions and `cargo-component`. A core module gets
 the whole benefit of the criterion — an archived set that *executes*, so a claim made under a set the
@@ -1641,22 +1642,24 @@ convention by comment is two things to keep in step.
 needs each applied stabilizer's risk tier and provenance, and a module that returns bytes cannot
 supply them. The ABI could be extended to report an `applied` list, and then the cap would rest on
 what the module says about itself — which is exactly the wrong place for it. So the archived path
-claims the weaker outcome on the weaker evidence, and a `Normalized` claim re-derived through its
-archived set reports `NormalizedWithCaveats` and reads as refuted. That is a real limitation rather
-than a rounding error: it is honest, and it is not yet good enough for a verifier checking an old
-`Normalized` claim. Revisit if the interface ever becomes typed.
+claims the weaker outcome on the weaker evidence. A `Normalized` claim re-derived through its
+archived set used to report `NormalizedWithCaveats` and read as refuted; since §3.109 it is
+*consistent*, a third answer that neither holds nor refutes, exits 0, and never promotes the
+re-derived outcome. Revisit if the interface ever becomes typed.
 
 `wasmtime` is behind a feature and on the verifier's forbidden list: 100 crates by default, 142 with
 `--features wasm`. The small tree is the claim a sceptic checks instead of trusting us, and a
 verifier who only checks claims made under their own set should not pay for a runtime they never
-use.
+use. Since §3.109 the full build enables it, because `attest` runs the module it names; the
+verifier still does not.
 
 ---
 
 ## 5. Open
 
-**An archived `Normalized` claim re-derives as `NormalizedWithCaveats`.** See §4b: the provenance cap
-cannot be confirmed from bytes alone.
+**Closed: an archived `Normalized` claim read as refuted.** It re-derives as
+`NormalizedWithCaveats`, since the provenance cap cannot be confirmed from bytes alone (§4b), and is
+now reported *consistent* rather than refuted (§3.109).
 
 **Closed: `trigon/mirror-corrupted-artifact`.** Left here as a signpost, because this is where it
 sat open across three investigations that each began at the mirror. It was never the mirror: npm 7.0
@@ -3596,7 +3599,7 @@ Two smaller residuals closed with it, both build provenance rather than code: `n
 
 **The trade.** Every managed assembly now compares by code, so a `.nupkg` that once rebuilt byte-clean under `dotnet-assembly-identity` alone reads `normalized_with_caveats` rather than `normalized`. That is honest for a compiled artifact — one always carries an embedded PDB and a build stamp it can rarely reproduce exactly — and it turns the common case, a `divergent` that was really code-identical, into a caveated match a reader can trust. The cost is that a difference only in resources or attributes now reads as a caveat too, which the Lossy tier exists to say out loud.
 
-**Correction.** "A real code change still shows" was true only of the method's own bytes. The form kept each method's name, signature and IL, and an IL token is a row number or a `#US` offset — `ldstr` names its literal, `call` a MemberRef row — so a same-length string literal, a MemberRef renamed or moved to another type under the same token, a method's Flags and ImplFlags, the fat header's MaxStack and locals, and the exception-handling sections after the IL (a catch clause's type) all compared equal: a changed program could read as a caveated match. So could one that changed only what no token names but the runtime acts on — a P/Invoke's entry point (`puts` made `system`, same signature), the method that implements an explicit override, the interfaces a type implements. And it read a body or heap as the file holds it, past the `SizeOfRawData` after which the loader maps zeros, so an exception table the runtime never sees was in the form. The form now keeps every method's flags, first parameter row and whole body — header, IL and sections — and, row by row and resolved to values, every table a token or a signature can name (TypeRef, TypeDef, Field, MemberRef, StandAloneSig, ModuleRef, TypeSpec, MethodSpec) with the AssemblyRef rows a TypeRef resolves in; the declarations that decide how the code runs (Param, Constant, FieldMarshal, InterfaceImpl, MethodImpl, ImplMap, ClassLayout, FieldLayout, NestedClass, GenericParam, GenericParamConstraint, EventMap, Event, PropertyMap, Property, MethodSemantics, ExportedType); the pointer tables of the uncompressed layout; and the `#US` heap whole. Whatever a token names is in the form at that position, so a retarget under an unchanged token shows, and so does a changed declaration. Everything is read from the bytes the file backs of the section an address falls in; a body or blob that runs past them declines the assembly. Checked against `System.Reflection.Metadata` over the 6,707 PE files in a local NuGet cache and SDK: of the 6,659 the form reads, every method's name, signature, flags, first parameter row and IL, every kept row and every `#US` heap read identically, apart from two places the reference normalises what the form keeps raw (a nil ResolutionScope's tag, a ClassLayout row of zeros). The form is at most 2.2× its assembly. Ten it no longer reads are the mixed-mode C++/CLI `System.EnterpriseServices.Wrapper.dll`s, whose native method bodies were never IL the form could hold; the other 38 carry no metadata. On the rebuilds kept on disk, `moq`'s four assemblies, `castle.core`'s four from the rebuild that reproduced and the twelve in the three `polly` packages still reduce to identical forms, and `Newtonsoft.Json`'s and the stale `castle.core` rebuild's still differ. What the form still drops is named in `ilcanon.rs`: resources, custom attributes and security declarations, the data a field is initialized from (FieldRVA), the Module and Assembly rows, and the exact metadata encoding. The pass is `dotnet-il-canonical-v2`: the set digest covers pass ids and not pass code ([`19`](19-distribution-and-lookup.md) §11, open question 1), so the new form under the old id would have changed what old records re-derive to under the digest they were signed with, and a new id is a new digest that sends them to their archived set.
+**Correction.** "A real code change still shows" was true only of the method's own bytes. The form kept each method's name, signature and IL, and an IL token is a row number or a `#US` offset — `ldstr` names its literal, `call` a MemberRef row — so a same-length string literal, a MemberRef renamed or moved to another type under the same token, a method's Flags and ImplFlags, the fat header's MaxStack and locals, and the exception-handling sections after the IL (a catch clause's type) all compared equal: a changed program could read as a caveated match. So could one that changed only what no token names but the runtime acts on — a P/Invoke's entry point (`puts` made `system`, same signature), the method that implements an explicit override, the interfaces a type implements. And it read a body or heap as the file holds it, past the `SizeOfRawData` after which the loader maps zeros, so an exception table the runtime never sees was in the form. The form now keeps every method's flags, first parameter row and whole body — header, IL and sections — and, row by row and resolved to values, every table a token or a signature can name (TypeRef, TypeDef, Field, MemberRef, StandAloneSig, ModuleRef, TypeSpec, MethodSpec) with the AssemblyRef rows a TypeRef resolves in; the declarations that decide how the code runs (Param, Constant, FieldMarshal, InterfaceImpl, MethodImpl, ImplMap, ClassLayout, FieldLayout, NestedClass, GenericParam, GenericParamConstraint, EventMap, Event, PropertyMap, Property, MethodSemantics, ExportedType); the pointer tables of the uncompressed layout; and the `#US` heap whole. Whatever a token names is in the form at that position, so a retarget under an unchanged token shows, and so does a changed declaration. Everything is read from the bytes the file backs of the section an address falls in; a body or blob that runs past them declines the assembly. Checked against `System.Reflection.Metadata` over the 6,707 PE files in a local NuGet cache and SDK: of the 6,659 the form reads, every method's name, signature, flags, first parameter row and IL, every kept row and every `#US` heap read identically, apart from two places the reference normalises what the form keeps raw (a nil ResolutionScope's tag, a ClassLayout row of zeros). The form is at most 2.2× its assembly. Ten it no longer reads are the mixed-mode C++/CLI `System.EnterpriseServices.Wrapper.dll`s, whose native method bodies were never IL the form could hold; the other 38 carry no metadata. On the rebuilds kept on disk, `moq`'s four assemblies, `castle.core`'s four from the rebuild that reproduced and the twelve in the three `polly` packages still reduce to identical forms, and `Newtonsoft.Json`'s and the stale `castle.core` rebuild's still differ. What the form still drops is named in `ilcanon.rs`: resources, custom attributes and security declarations, the data a field is initialized from (FieldRVA), the Module and Assembly rows, and the exact metadata encoding. The pass is `dotnet-il-canonical-v2`: the set digest covers pass ids and not pass code ([`19`](19-distribution-and-lookup.md) §11.1, D9), so the new form under the old id would have changed what old records re-derive to under the digest they were signed with, and a new id is a new digest that sends them to their archived set.
 
 **Correction** (2026-09-29,
 [3.106](#3106-stabilizer-defects-found-while-documenting-every-pass-two-false-matches-first)). It
@@ -5892,7 +5895,7 @@ at a time and each with what it changes, what it can hide and where it declines,
 in twelve passes. Two were false matches, the one failure this project cannot have. The rest made a
 digest depend on something other than what a package holds. Every fix that changes what a pass
 writes gave the pass a new id, since the set digest covers pass ids and not pass code
-([`19`](19-distribution-and-lookup.md) §11, open question 1): twelve new ids, and a new set digest
+([`19`](19-distribution-and-lookup.md) §11.1, D9): twelve new ids, and a new set digest
 for every profile but `zip` and `raw`. A review of the fixes then found more false matches: in the
 checks the first fix added, in the IL pass beside it, in the branch pass, and in the parser and
 serializer under every pass. They are under **Found in review** below, and one took a thirteenth id.
@@ -6095,3 +6098,441 @@ between it and a digest only in a set narrowed without the IL pass, which `trigo
 any archive inside a wheel, a `.nupkg` or a zip, still reaches the digest as it was compressed. A
 gzip file whose later members hold data, rare in a package and legal by RFC 1952, reaches no verdict
 as an artifact, where it had one.
+
+### 3.107 Eight small rulings, two of them measured first
+
+On 2026-09-30 the owner ruled on the small questions a review had left open. Two needed a number
+before the ruling could be kept; the rest put a behaviour and the text describing it back in line.
+
+**The IL form's bound, measured.** `canonical_managed` declines an assembly whose form outgrows
+`MAX_EXPANSION`, four times the file, and compares its bytes instead: without a bound, 258 KB
+crafted to repeat one heap entry per row became 524 MB. The four was a judgement, so the form was
+computed with no bound, by a scratch copy of `ilcanon.rs` with the constant lifted, over every PE
+file, loose or inside a `.nupkg`, in the places the development machine keeps .NET assemblies,
+unique by SHA-256: 6,069 from the local NuGet cache (3,261), the .NET SDK and runtime under
+`/usr/lib/dotnet` (2,300), the source checkouts Trigon cached (422), the packages fetched and
+rebuilt under `work/` (70) and the store's blobs (16). 5,582 are IL-only assemblies the form reads;
+389 carry native code and are declined on the CLI header's word, 96 are not managed, and 2 are
+compiler test fixtures the form declines. Over the 5,582 the form is 0.26 times the file at the
+median, 1.18 at p90, 1.31 at p95, 1.54 at p99, 1.94 at p99.9 (interpolated), and 2.21 at most.
+1,004 exceed 1, 441 of them outside any reference pack, so a form larger than its file is ordinary
+and not only the heavy sharing of heap entries the review expected; five exceed 2, and none 4. The
+largest are reference assemblies, metadata with no bodies: `System.Runtime.Intrinsics.dll` from the
+.NET 10, 6 and 8 reference packs (2.21, 2.21, 2.10) and `Microsoft.VisualBasic.Compatibility.dll`
+from the .NET Framework 4.0 reference assemblies (2.05, in two copies). Of the 2,576 outside a
+reference pack (a `ref/` directory, a `*.Ref` targeting pack or a reference-assemblies package) the
+largest is 1.71, the .NET 10 runtime's `netstandard.dll` facade, and the packages under `work/`
+reach 1.54, a rebuilt `Castle.Core.dll`. The bound stays 4, since no real assembly exceeds it. Five
+come within a factor of two of it, the margin the review set for looking again: a reference
+assembly with more shared signatures would be the first declined, which costs it normalization and
+can never make a false match.
+
+**The PCL `.deb`, pinned.** `PCL_DEB`'s doc comment said its digest was checked, and nothing checked
+it: the image step ran `wget` and then `dpkg-deb -x`. The digest now comes from Mono's signed apt
+index. `dists/stable-focal/InRelease`, whose Release is dated 12 Jul 2023 15:15:36 UTC
+(`dists/focal` serves the same file), verifies under key `3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF`,
+"Xamarin Public Jenkins (auto-signing)", fetched from keyserver.ubuntu.com into a scratch keyring
+and its fingerprint compared; `main/binary-amd64/Packages` hashes to the SHA-256 the Release gives
+it; and it lists this `Filename` at `34a050d4…b107`, 1,018,344 bytes, which the file downloaded on
+2026-09-30 matched. `PCL_DEB_SHA256` holds it, and the step runs `sha256sum -c` before `dpkg-deb`,
+so other bytes fail the image build.
+
+**The rest.**
+
+- A `.trigon` in the working directory that is a file rather than a directory failed every command
+  that reads the configuration with the host's ENOTDIR, exit 5. It is a project with no file of its
+  own now, as `log/files.rs` already read one.
+- A `sweep` stopped by `--wall` or by the memory or disk floor exited 0, as a finished one does. It
+  exits 3 now, after its summary, so a scheduler can tell a corpus to resume from a finished one
+  without reading stderr.
+- `insert_run`'s doc comment promised a row version that every update compares and an upsert that
+  never moves a run back, and the upsert overwrote whatever the row held. A `done` row now ignores
+  a record of an earlier state, by a `WHERE` on the `DO UPDATE`, and the comment says the rest is
+  still the last writer's: no caller carries the version it read, so D7 is narrowed and not closed.
+- An `Authorization` header of a scheme other than `Bearer` stays anonymous, and the API now says
+  why: a proxy's `Basic` credential is addressed to the proxy, and refusing it would refuse every
+  read behind one.
+- A mirror serving a repository with no log at all, no checkpoint anywhere, refused the whole
+  source as failing verification (§3.102). That is `LogError::NoLog` now, which does not fail
+  verification: the location is set aside as unreadable, with a note naming its URL and the likely
+  causes, a mistyped URL or a repository nothing has been published to, and the others answer. A
+  source whose every location is like that could not be synced, as one not reached could not: it
+  answers from its clone until the clone is stale, and is unknown if it never synced. A checkpoint
+  that is there and does not open under the key still refuses the source. A source trusting on
+  first use read its keys from the first location reached, so a mistyped URL listed first stopped
+  its first sync on the missing `keys/log.vkey` before a right one was read; it passes over a
+  location with no log at all now, with a note, and reads the keys from the first that holds one.
+- The mirror's NuGet documents carried the moment as the client spelled it, where every other
+  route writes it normalized. They carry the normalized moment now, so a transcript row names the
+  moment the filter applied rather than an offset or a fraction the filter dropped.
+
+### 3.108 Runs moved between stores: `trigon runs export` and `trigon runs import`
+
+**Built.** The owner decided on 2026-09-30 that two machines confirm each other by moving runs
+between their stores, not by sharing one ([`19`](19-distribution-and-lookup.md) D8). `rebuild
+--confirm`, `attest` and `publish` each read one local store (`Store::local`), and nothing moved a
+run from one store to another, so a confirmation made on a second machine counted nowhere the first
+attempt was. Now machine A exports its run, B imports it and confirms it, B exports the
+confirmation, and A imports that and publishes ([`using-trigon.md`](using-trigon.md), "Task:
+confirm on a second machine"). The code is `crates/trigon/src/transfer.rs`, under the existing
+`trigon runs`, which still lists a store when given no subcommand.
+
+- **What an export holds** is each run's record and every file the record names that `attest`,
+  `publish` and `rebuild --confirm` read: the kept artifacts, the comparison, the strategy, the
+  build log, the model exchange, the network transcript, the guard manifest and the rendered
+  instructions; each statement the record names, at the path it names it by, with every blob the
+  statement signs as evidence but the rebuilt artifact, which a prune drops (the set's manifest
+  file and the set module of §3.109 among them); and the set's manifest under `stabilizers/`. The
+  guard manifest, the instructions and the set's manifest go where the store holds them, since runs
+  recorded before the first two were kept name digests of bytes nobody has, and only `attest`
+  publishes the third. Anything else missing refuses the export, and nothing is written. The
+  reading aids under `derived/` and `decompiled/` stay behind: they are keyed by the digest of
+  something else, so an import could not hold them to their names, and `trigon rederive` makes
+  them again.
+- **The container is an uncompressed tar, written by `trigon-archive`.** `trigon-runs.json` comes
+  first, naming the schema, `trigon.runs/v1`, and the runs; then every other file in path order, a
+  record, a set's manifest and a statement under the store's own name for it, and a blob as
+  `blobs/sha256/<hex>`, without the directory of its first two hex digits that the store files it
+  under. Each is a regular file of mode 0644 modified at the epoch, so the same runs give the same
+  bytes however they are named on the command line. The other container the repository already reads
+  and writes safely, one canonical JSON document carrying the blobs, lost for two reasons: an
+  artifact is binary and may run to hundreds of megabytes, which base64 makes a third larger and a
+  parse holds several times over, and a run record carries floats, so it is not canonical JSON. The
+  reader is the one pointed at hostile artifacts, under the same `Limits`. An export holds its own
+  file to the import's checks before writing it.
+- **An import checks the whole file before it writes anything** (threat model P47). The file is a
+  regular file within `Limits::total_expanded_bytes` and `max_entries`, and is never decompressed:
+  a gzip file is refused. Every entry is a regular file, with no link, directory, device, PAX record
+  beyond a long name, reader's note or byte after the end, at a path an export writes, matched
+  whole, so no `..` and no leading `/`. Every blob hashes to its name; every JSON document is at
+  most a published record's length and parses; every record's id is its file's and one the store
+  addresses; every file a record names is carried, each statement in the store's statement layout
+  under its run or its published artifact; and every entry is named by a run in the file. Then the
+  blobs are written, the set manifests, the statements and each record last, under
+  `Store::keeping`, the lock a prune takes turns on, so a failed import leaves blobs no record
+  names and never a record naming a blob that is not there.
+- **A run already in the store** as the file has it is left alone. One that differs is refused
+  with the fields it differs in, and so is the whole import. A statement is never written over:
+  `Store::put_statement` is a create, the same bytes are answered as written, and other bytes are
+  the new `StoreError::StatementTaken`. `Store::is_statement_path` holds a statement path from
+  another store to the layout this store writes, because `ObjPath::from` percent-encodes a `..`
+  rather than refusing it and drops an empty segment; `Store::is_run_id` exposes the rule
+  `put_run` already applied. Each record is written by `Store::create_run`, a create as
+  `put_statement` is: the same record already there is answered as written, and another is the new
+  `StoreError::RunTaken` and left as it is.
+- **An import writes each record as it came.** The host id, the start time, the cache state and the
+  image pin are the exporting machine's, and nothing about the importing machine is added. The
+  gate's same-host rule compares the host ids the records carry, so importing a run trusts its maker
+  as far as sharing a store with them would: threat model D40, §1.13 item 18, and a §1.14 misuse.
+  That trust reaches the confirming machine too: `rebuild --confirm` of an imported run repeats the
+  strategy the file carries, on the base image and at the egress tier the record names, and takes
+  neither `--image` nor `--egress`, so the file's maker chooses what it pulls and runs. The model
+  also names the two commands in §1.2 and gains a §1.4 boundary, a §1.5 side effect, a §1.7 row and
+  two matrix rows, a §1.8 output, a §1.10 entry for whoever made the file, and a §1.16 condition.
+
+**Found while building it.** The first statement-path rule allowed the characters of npm, PyPI,
+crates.io and NuGet names and versions but not a PEP 440 epoch's `!`, so an attested run of a
+version like `1!2.0` could not be exported. `!` is allowed now; `ObjPath::from` writes it as it is.
+A statement path over the 100 bytes a tar header's name field holds, which any scoped npm package
+with a long name has, goes in a PAX `path` record, which the reader takes as the name and does not
+leave among the PAX records an import refuses. Both have a test.
+
+**Found in review.** The import first wrote each record with `put_run`, which writes over whatever
+is there, after `against` had found no record under the id. `Store::keeping` is shared between
+writers, so it held off no other import or writer: two carrying different records of one run id at
+once both passed the look, and the last write replaced the other record, which the rule that a run
+with different content is refused forbids. The record is a create now (`Store::create_run`); the
+test `a_run_filed_here_after_the_import_looked_is_never_written_over` files another record between
+the look and the write and finds it refused and left as it is.
+
+**Measured on the development store.** Each of its 371 runs exported alone. All 371 in one file:
+1,335 files and 190,745,088 bytes, written in 47.6 s at 443 MB resident by the debug build, and
+imported into an empty store in 44.9 s. Exported again from that store, with the runs named in the
+other order, it gave the same bytes. Imported again, and imported into a copy of the store it came
+from, it wrote nothing: every run was already there as the file had it. The new store held every
+run, all 93 statements and all 7 set manifests of the original, and 863 of its 864 blobs; the one
+left behind is named by no run. 52 of the 371 run files differ in bytes and in nothing a record
+reads: 33 write out fields added since with a default (`attempt`, `non_builtin_stabilizer`), one of
+them drops a key this Trigon no longer reads (`transparency`), and 19 write a build time with fewer
+digits (`52.508991230999996` as `52.508991231`), because `serde_json` without its
+`float_roundtrip` feature can read a number as the double next to it. Every rewrite of a record in
+any store does the same, and nothing is decided on a build time.
+
+**Tests.** In `transfer.rs`: a run moved whole, byte for byte, with the maker's host and start
+(`a_run_moves_whole_and_as_it_was_recorded`); the same bytes for the same runs named in any order
+(`the_same_runs_export_to_the_same_bytes`); every refusal, each leaving the store empty
+(`an_import_is_checked_whole_before_anything_is_written`: a forged blob, a missing blob or
+statement, a record that is not one or is filed under another id, `..`, absolute, `./`, upper-case
+and unexported paths, a statement outside its run's directory, a stray blob, a duplicate entry, the
+manifest not first, another schema, an unlisted run, an oversized document, a symlink, a hard link,
+a directory, a FIFO, bytes after the end, gzip, not a tar, too long and too many entries); a run
+already here, the same or different
+(`a_run_already_here_is_left_alone_or_refused_and_nothing_else_is_written`); a statement taken
+(`a_statement_that_differs_where_the_run_names_it_refuses_the_import`); a failed write leaving no
+record (`a_failed_import_leaves_no_record_naming_blobs_that_are_not_there`); a store missing a named
+blob (`a_run_whose_store_lost_a_file_it_names_is_not_exported`); and a long statement path and an
+epoch (`a_run_whose_statement_has_a_long_name_or_an_epoch_moves_whole`). In `main.rs`, `rebuild
+--confirm`'s argument checks find an imported run and its strategy blob
+(`a_run_imported_from_another_store_is_one_confirm_repeats`). In `tests/publish.rs`, two attempts
+made in two stores on two host ids, built as that file builds runs and each imported into one store,
+are withheld while one is there and signed and published once both are
+(`attempts_made_in_two_stores_and_imported_into_one_are_published_there`). In
+`trigon-store/tests/store.rs`, `put_statement` never writing over another and refusing paths outside
+the layout, every path `put_attestation` files at accepted, and `is_run_id`.
+
+**Not done.** The flow has not been run on two machines with podman; two stores stand for them in
+the tests. An import reads the whole file into memory, up to the 4 GiB ceiling. A record goes as
+this Trigon reads it, so a key it does not know is dropped on export and on import: export and
+import with the same version. A record's `published` goes with it, so a run published from A and
+imported into B says it was published, from A's repository.
+
+### 3.109 Every published verdict names its stabilizer set as a module
+
+**Built.** The owner decided on 2026-09-30 that publishing archives each stabilizer set as a WASM
+module in the evidence repository, so a published verdict stays re-derivable after binaries stop
+carrying its set ([`19`](19-distribution-and-lookup.md) D9). The pieces:
+
+- `scripts/build-set-module.sh` builds `crates/trigon-stabilize-wasm` for `wasm32-unknown-unknown`
+  and prints the module's path, its sha256 and the commit it names, reproducibly (below).
+- `[publish] stabilizer_module` names it in `evidence.toml`, a path expanded as `log_key` is, and a
+  project's file cannot set it, since it cannot set `[publish]`; `trigon attest --stabilizer-module
+  <file>` wins over it. `rebuild --attest`, which signs through `attest`'s code, reads the setting
+  too.
+- `attest` loads the module from the bytes it read and hashed and refuses to sign, leaving nothing
+  filed, unless the module reports the run's set digest for the run's profile and stabilizes both
+  stored artifacts to exactly the stabilized digests the run recorded, which it has just re-derived
+  natively. It then keeps the module in the store as a blob and signs its sha256 as
+  `evidence.stabilizerSetModule` (`trigon_attest::evidence_key::STABILIZER_SET_MODULE`); the
+  record's unsigned map carries it too, and the check that the map agrees with the statement covers
+  it with no change, since that check compares whatever the statement signs. A void and a
+  withdrawal name no module.
+- `publish` refuses a verdict that names none, saying how to build and configure one, and copies the
+  module into `evidence/sha256/` with the rest of the evidence, one file for any number of records.
+- `verify-attestation --rerun-comparison` re-derives natively where the binary carries the
+  statement's set. Where it does not, the record form and `--lookup` read the module the record's
+  evidence carries, held to the signed digest, and run it; a module the directory does not hold is a
+  check not made, exit 5. `--stabilizers <module.wasm>` runs a module whatever the binary carries,
+  and is held to the signed digest where the statement signs one (`trigon_attest::check_set_module`,
+  `AttestError::WrongModule`: exit 5 in the record and `--lookup` forms, and 1 for a bundle, as for
+  anything that stops it). A statement that signs none, a v1 bundle or a verdict signed before
+  modules were, binds none, and a module given for it is run, held only to the set digest it
+  reports and to the stabilized digests, which the output says. A bundle's module comes only from
+  `--stabilizers`. Where
+  the module cannot be run here, a bundle's without one or any in the verifier build, a `.json`
+  manifest given still says what the set held before the refusal, as on a set mismatch.
+- The full build's `build` feature enables `wasm`. The verifier (`--no-default-features`) still links
+  no `wasmtime`, which `xtask policy` checks as before, and says which build runs a module when it
+  meets a verdict under a set it does not carry.
+- The third answer, decided the same day: through a module, a `normalized` claim whose stabilized
+  forms re-derive equal is *consistent* (`Rederived::consistent`). It is not refuted and exits 0, as
+  a claim that holds does, because `docs/19` §6's 0 is a verdict at or above
+  `normalized_with_caveats`, which is what the module re-derives; 1 and 4 would call false a claim
+  nothing re-derived contradicts, and a code of its own would be a sixth meaning in a table CI
+  reads by order. The
+  re-derived outcome is never promoted, and every other difference between the outcomes is refuted
+  as before. Threat-model Q16 is answered and D18 restated.
+
+**A plain build of the module is not reproducible.** The release profile keeps debug information
+(`debug = 1`), which is 7.0 of the module's 7.6 MB, and the compiler embeds source paths for panic
+messages. Two clean builds in one checkout, into different target directories, gave the same bytes
+(`5a8765d1…`), but the module held 156 strings naming `/home/mike/.cargo/registry/…` and the
+checkout's own path, so a checkout anywhere else, or a different `CARGO_HOME`, gives other bytes: a
+build from a copy of the checkout elsewhere, without debug information and without remapping, was
+`0fae262e…` and still named the registry. The script builds without debug information, strips it,
+rewrites the checkout's path and cargo's with `--remap-path-prefix`, sets the flags outright so the
+environment and a cargo configuration add nothing, and builds `--locked`. Three runs of the script,
+in the checkout and in two copies of it at different paths, one with a different `CARGO_HOME`, gave
+the same 577,138 bytes (`2bfd0ece…`), with no path in them, and so did a fourth, from a git worktree
+of the same commit at another path into another target directory. So a verifier can rebuild the
+module a verdict names and compare digests.
+
+The script first passed the remapping in `RUSTFLAGS`, which cargo splits on whitespace, so a
+checkout or a `CARGO_HOME` whose path has a space in it came apart into flags that named neither
+path, and the build failed or kept the path. It now sets `CARGO_ENCODED_RUSTFLAGS`, one flag per
+0x1f-separated field, and unsets `RUSTFLAGS`. Built with that and naming its commit (below), the
+module from this batch's tree, in the checkout and in a git worktree of the same commit at another
+path, gave the same bytes (`c2bfc22d…`), both naming `f4f622e4….dirty`.
+
+**What makes a module worth running is its signed digest, not its answer.** `trigon_set_digest` is
+the module's own word, and any module can return any 32 bytes, so a module built to make a false
+claim hold can report the right set digest and stabilize any two artifacts to what the statement
+signs. The host's check (`ArchivedSet::check`) catches the wrong module and not a dishonest one. A
+verifier now runs a module only when the sha256 of its bytes is the one the verdict signs, which
+binds it to the signer's claim; the host still asks for the set digest as well. That leaves the
+signer's own module, which the binding cannot make honest: threat-model D39 disclaims it, and
+rebuilding from source is how it is checked. Threat-model P26 said the archived-set loader is
+chosen on the command line and never by an attestation, which a record's module now makes false,
+and it is restated: a module a verified record's signed verdict names by digest, where the binary
+does not carry the set, and never one an artifact or an unsigned part of a record selects. P48 is
+new, for the publication: every verdict published names its module and the repository holds it,
+and P34 lists the refusal with the others.
+
+**Found on the way.** The crate's documentation and §4b called the ABI four functions over a byte
+buffer. It was three, `trigon_alloc`, `trigon_stabilize` and `trigon_set_digest`, over the memory
+the module exports, and both now say so; `trigon_source_commit` is the fourth, appended. The parity
+tests looked for the module in the checkout's `target/` whatever `CARGO_TARGET_DIR` said, where the
+script builds it into `CARGO_TARGET_DIR`, so a run with another target directory tested a stale
+module or found none; they look beside the test binary now, as `crates/trigon/tests/set_module`
+does.
+
+**The commit the module was built from.** Reported open at first: the verdict named the commit of
+the Trigon that signed it (`trigonVersion.attestor`), nothing named the module's, and since the
+module's bytes change whenever a line of the stabilizer crates moves, rebuilding it to compare was
+guesswork. The guest now exports a fourth function, appended to the ABI, `trigon_source_commit`,
+which returns what `TRIGON_SET_MODULE_COMMIT` held when it was compiled. The script sets it to `git
+rev-parse HEAD`, with `.dirty` after it where the tree had changes the commit does not, as
+`build_version` does for the binary, and to nothing outside a git checkout, whatever the
+environment held. The statement format is unchanged: the commit is in the bytes the verdict signs
+by digest. The host reads it where the export is, a module built before it having none, and refuses
+an answer that is not 40 lowercase hex digits with an optional `.dirty` rather than print text a
+module chose; `verify-attestation` puts it on the module line. `attest` prints it beside its own
+commit, and says so where the module names none or is dirty. It refuses neither, since it asks of a
+module only that it reproduce the claim, and a dirty module is what a development tree builds.
+
+The parity test that the script's module names its commit first read the module beside the test
+binary, which is whichever build of it ran last. A plain `cargo build` of the module names no
+commit, so any such build after the script's failed the test, and the verification of this batch
+failed it that way: it was testing the order of two builds, not the script. The test now runs the
+script itself, offline, into a target directory no other build uses (`build-set-module` under
+cargo's `CARGO_TARGET_TMPDIR`), and checks that the module names the commit the script printed.
+That costs about ten seconds the first time and nothing after, until a source or the commit
+changes. Checked in a scratch worktree: it fails when the script hands the build no commit, when it
+hands one other than it prints, and when the guest names none.
+
+**Cost.** Loading the module compiles it with Cranelift: about 0.6 s per `attest` and per
+re-derivation through a module, against 0.06 s natively, on this machine. Instantiating it again for
+each artifact, below, costs nothing measurable: stabilizing a 4 KiB artifact took 112 µs in a fresh
+instance and 115 µs in a reused one. The module is one
+evidence file per set version, not per record. `cargo test -p trigon` now needs it built, since
+every test that publishes a verdict names it (`crates/trigon/tests/set_module/`, which fails saying
+how to build it rather than skipping), and CI's test job builds it with the script first.
+
+**The size of artifact a module can stabilize.** A `wasm32` module addresses at most 4 GiB, and the
+guest never frees what `trigon_alloc` hands out or what it returns. The host ran both artifacts of
+a comparison in one instance, so the second ran in what the first had left; it now instantiates the
+compiled module afresh for each artifact. Measured with a release build of the host and this
+checkout's module, over a tar.gz of one member: in one instance, a pair of 384 MiB incompressible
+artifacts stabilized and a pair of 416 MiB did not; in an instance each, an artifact that expands
+to 496 MiB stabilizes and one of 512 MiB does not. Zeros, whose input is a few MB, stop at the
+same place, so the limit is the expansion and the stabilized form, each in a buffer that grows by
+doubling, and not the input. At 512 and 768 MiB the guest traps in `rust_oom`; from 1 GiB
+inflating returns an allocation error instead, which the guest's `0` merges with a malformed
+artifact, so the host's refusal now names running out of memory among its causes. The native set
+takes up to 4 GiB (`Limits::total_expanded_bytes`). So an artifact that expands to 512 MiB or more
+cannot be attested with a module, and cannot be published: `attest` refuses to name the module, and
+`publish` refuses the verdict. Raising the limit means stabilizing in less memory, with buffers
+sized once or an expansion streamed, which is the archive crate's to change and not the host's.
+
+**Tests.** `crates/trigon-attest/tests/evidence_config.rs` (the key, its expansion, a misspelling, a
+project's file), `evidence_repo/rerun.rs` (the third answer and nothing else consistent; the module
+held to the signed digest), `verdicts.rs` (the key signed, and not by a void);
+`crates/trigon-stabilize-wasm/tests/parity.rs` (a module loaded from its bytes; the script's module
+names its commit), `host.rs` (an instance per artifact; the commit a module names, none, and an
+answer refused), `build_script.rs` (a path with a space is one flag, nothing is taken from the
+environment, and the commit, clean and dirty); `crates/trigon/tests/seam_attest_refusals.rs` (a
+module of another set, one with the right set digest that stabilizes differently, one that
+reproduces the published side of a divergence and not the rebuilt one, one that cannot be loaded,
+the flag over the configuration, a void, no module, and the commit `attest` prints, and one that is
+not a commit refused), `verify_attestation_sets.rs` (a bundle under a set this binary lacks, the
+wrong module, a module forced where the set is carried, the verifier's message, a manifest still
+describing the set where its module cannot run, and the commit on the module line),
+`publish.rs` (the refusal, one copy for two
+records, and the round trip: a verdict under a set no binary carries, published with its module and
+re-derived from the record through it, the module given with `--stabilizers` and another refused,
+exit 5, the module missing, and the module replaced), `lookup.rs` (the same through `--lookup`, the
+module fetched from the clone's remote), and `rebuild --attest` in `crates/trigon/src/main.rs` (it
+reads `[publish] stabilizer_module` as `attest` does). Each was checked to fail with the code it
+covers removed, in a scratch worktree. Modules the tests need that no source builds are assembled in
+`crates/trigon/tests/set_module/mod.rs`, a few dozen bytes each.
+
+### 3.110 Every report prints the checkpoint root it answered from
+
+On 2026-09-30 the owner decided (docs/19 D11) that every report that answers from an evidence source
+prints that source's checkpoint root, so that two users can compare their views of a log by pasting
+one line. Until witnesses cosign, that and a client's own mirrors are what catch a split view (§8).
+Before this, a report said only `as of <n> leaves of <origin>`, which two different logs of one size
+share.
+
+**The line.** `checkpoint <origin> <size> <root>`: the checkpoint note's three lines on one, the
+root in padded standard base64, the only spelling a checkpoint's third line can have and still be
+read (`Checkpoint::parse`), so the line can be held to the third line of anyone's `log/checkpoint`
+too. One function, `clones::checkpoint_line`, makes it for every report, and `checkpoint_json` makes
+its JSON, `{origin, size, root}`, under the key `checkpoint` wherever a report describes a source.
+It is printed on a line of its own directly under the `source` line; the `as of` label stays.
+
+**Which checkpoint.** The one the answer was given from: that of the last log of the chain the
+clones were opened to, which is the checkpoint a sync writes to the state as accepted (the tests
+hold the printed root to the state file's, after a succession too, where it is the successor's), and
+under `--remote` the one fetched and verified against it, which can be newer and is what `--remote`
+answers from. The line appears wherever the label's `as of` does, so a frozen source, whose
+checkpoint was read and verified and which answers unknown because of what that checkpoint's log
+says, prints it too (under `--remote`, the tests hold it to the served checkpoint, for a log with no
+leaf and for one whose newest leaf is old); a source whose clones could not be opened answers from
+no checkpoint and prints none (`checkpoint: null`). `verify-attestation --record` prints the
+checkpoint of the log it read, from `--evidence` or from the source's clones. `verify-attestation
+--lookup` checks a record in one source and weighs every source it asked, so it prints each other
+source after the record's report, under a `source` line of its own with its checkpoint line below,
+one per source even where two share a checkpoint, and lists those sources in JSON as `otherSources`,
+each with its name, label, what it says and its `checkpoint`. It first printed only the lines, under
+the record's source's, and dropped one equal to a line already printed, so the text never said whose
+each line was, and a mirror at the same checkpoint printed nothing; review found it, and the text
+now names each source as the stop does. Where it finds no current record to check, and stops with
+what the sources say instead, it prints each source asked with its line on stdout, before that
+answer on stderr, and the stop's JSON lists them as `sources`, with the same four fields; a stop
+before any source answered lists none. `evidence sync` prints the checkpoint it accepted under its
+`synced` line.
+
+**What else changed.** `evidence list` printed `checkpoint <n> leaves of <origin>`: the size, from
+the clone where it opened and from the sync record where it did not. It now prints the checkpoint
+line where the clones opened. Where they did not, nothing answers from a checkpoint and the sync
+record keeps no root, so it prints `recorded  <n> leaves of <origin>, by its last sync: nothing
+answers from its clones now` rather than a line that looks like a checkpoint it answered from.
+`list --output json` keeps `size` and adds `checkpoint`, `null` in that case.
+
+**What it does not do.** Two matching lines say both users were shown one tree at that size, not
+that nothing newer exists (D32); lines at two sizes prove nothing either way, and the one behind
+syncs and compares again. The threat model records the property as P49, and A9 and D32 say what it
+catches and what it does not.
+
+### 3.111 Eight more small rulings: the CI rung, the signature, the log and the providers
+
+On 2026-09-30 the owner ruled on eight more of the small questions the review had left open. Each
+behaviour change has a test that fails without it.
+
+- **The CI rung's PyPI recipe kept the artifact under test within reach of its own build.** The
+  heuristic excludes `name!=version` and always points the build at the constraints file that
+  carries the exclusion; the CI lowering had kept the shape from before that fix, with no exclusion
+  and no constraints unless a backend was read. Both rungs now take those parameters from one pair
+  of functions in `heuristic.rs` (`pypi_deps`, `pypi_build`), so they cannot drift again. The rung
+  is still unwired (B11).
+- **A workflow that built only the other distribution no longer lowers.** Every build command in
+  the job naming `--wheel` in a run about the sdist, or `--sdist` in one about a wheel, is
+  `Decline::WorkflowBuildsAnotherKind { built, wanted }`, and the workflow's evidence is still
+  returned for the rungs below. A command with neither flag builds both, as the frontend does.
+- **A `.gz` member only one side descended into is compared by its bytes.** When one side's inner
+  archive parsed and the other's did not (`NestedParseFailed`), the signature asked the parsed side
+  for a body it does not have and coded the member `body-unreadable`, though both could be read.
+  It compares `stabilized_bytes()` now and emits `body@path` where they differ; `body-unreadable`
+  is kept for a read that really fails.
+- **The progression counts a nested archive's framing as its member.** `container:*@p` and
+  `entry-order@p` counted as differences and not as members, so when `gzip-meta-v2` cleared a
+  gem's inner gzip header the step named nothing it closed. It names `data.tar.gz` now.
+- **Blank lines collapse like any other in a compressed log.** They were exempt, so a log ending in
+  forty of them filled the tail window with nothing, and the last real line survived only if it
+  looked like an error. The one- and two-line gaps in a Python traceback are shorter than a run
+  that collapses and pass through unchanged.
+- **`resolve_toolchain`'s doc comment said an unparseable version was skipped with a note.** No
+  note exists and the result has nowhere to hold one. The comment now says so, and B11 records the
+  `skipped` list to add before workflow text reaches the function.
+- **`reasoning_effort` goes only to the flavours known to take it.** `propose` sends a depth on
+  every call, and `body()` sent it to every OpenAI-shaped flavour, against `with_reasoning`'s rule
+  of widening on evidence. `Flavor::takes_reasoning_effort` is true for Ollama and OpenAI and
+  false for OpenRouter and `compatible:` endpoints. The last rung of the depth walk now asks at
+  `Effort::Low` with reasoning off, as `opinion::on_diff` does: `None` would have been the
+  provider's default depth, deeper than the call that was already too big.
+- **A Copilot prompt too long for one argument is named as that.** Every spawn failure carried "The
+  Copilot CLI has to be installed and signed in" and was retried as transport. The hint now goes
+  only with `ErrorKind::NotFound`. On Linux a prompt of 128 KiB or more is refused before the spawn,
+  and `ArgumentListTooLong` from the spawn is read the same way, as `LlmError::PromptTooLarge`,
+  which names the prompt's size and the limit and is not retried. Handing the prompt over another
+  way, and the nonce fence and shared working directory, stay open in B29 with the reasons.

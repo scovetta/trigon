@@ -200,6 +200,38 @@ fn base_image_print_unpacks_the_pcl_assemblies_rather_than_installing_them() {
     assert_eq!(podman_calls(&d), "");
 }
 
+/// The `.deb` is checked against the SHA-256 Mono's signed index gives it after it is fetched and
+/// before `dpkg-deb` reads it, by `sha256sum -c` under `set -e`, so other bytes fail the image
+/// build instead of being unpacked into it.
+#[test]
+fn base_image_print_checks_the_pcl_digest_before_it_unpacks() {
+    let d = dir("pcl-digest");
+    let out = run(
+        &d,
+        &os(&[
+            "base-image",
+            "--from",
+            FROM,
+            "--pcl-reference-assemblies",
+            "--print",
+        ]),
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    let at = |what: &str| {
+        text.find(what)
+            .unwrap_or_else(|| panic!("no `{what}` in:\n{text}"))
+    };
+    let check = at(
+        "echo '34a050d4e8aa33a81e79e449135feadf32c174d48e8ddfbee947863b0978b107  \
+                    /tmp/pcl.deb' | sha256sum -c -; \\\n",
+    );
+    assert!(at("RUN set -eu;") < check, "{text}");
+    assert!(at("wget -O /tmp/pcl.deb ") < check, "{text}");
+    assert!(check < at("dpkg-deb -x /tmp/pcl.deb"), "{text}");
+    assert_eq!(podman_calls(&d), "");
+}
+
 /// A tag resolves to different bytes on different days, so `--from` is refused unless pinned —
 /// before anything is printed or built.
 #[test]

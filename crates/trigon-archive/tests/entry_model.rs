@@ -10,8 +10,8 @@ use std::io::{Seek as _, SeekFrom, Write as _};
 use std::sync::Arc;
 
 use trigon_archive::{
-    Archive, ArchiveError, Body, EntryKind, GzipHeader, Limits, SourceMap, gzip, parse, serialize,
-    tar,
+    Archive, ArchiveError, Body, Entry, EntryKind, GzipHeader, Limits, RawMeta, SourceMap, gzip,
+    parse, serialize, tar,
 };
 use trigon_core::{EntryPath, Format};
 
@@ -181,6 +181,52 @@ fn mutating_a_body_copies_it_out_of_the_source_and_marks_the_entry() {
     // Already inline: mutating again works on the same buffer.
     a.entries[0].body_mut().unwrap().truncate(6);
     assert_eq!(a.entries[0].body_bytes().unwrap().as_ref(), b"before");
+}
+
+// --- a writer's own files -------------------------------------------------------------------------
+
+/// A tar made of `Entry::tar_file`s reads back as the regular files it was made of, with nothing
+/// noted about any of them, and is the same bytes each time it is made: `trigon runs export`
+/// promises the same file for the same runs, and `import` refuses anything but such entries.
+#[test]
+fn a_tar_of_a_writers_own_files_reads_back_as_them_and_is_the_same_bytes_each_time() {
+    let long = format!("attestations/npm/{}/1.0.0/a.intoto.json", "n".repeat(120));
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("trigon-runs.json".into(), b"{}".to_vec()),
+        ("blobs/sha256/00".into(), Vec::new()),
+        (long, b"x".repeat(1025)),
+    ];
+    let make = || {
+        let mut a = Archive::new(Format::Tar, trigon_archive::Trailer::Tar);
+        for (n, (path, bytes)) in files.iter().enumerate() {
+            let path = EntryPath::from(path.as_str());
+            a.entries
+                .push(Entry::tar_file(path, n as u32, bytes.clone()));
+        }
+        let mut out = Vec::new();
+        tar::write(&a, &mut out).unwrap();
+        out
+    };
+    let bytes = make();
+    assert_eq!(make(), bytes, "the same files, the same bytes");
+
+    let mut notes = Vec::new();
+    let src = Arc::new(SourceMap::owned(bytes));
+    let back = tar::read(src, &Limits::default(), &mut notes).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert!(back.tar_trailing.is_empty());
+    assert_eq!(back.entries.len(), files.len());
+    for (e, (path, bytes)) in back.entries.iter().zip(&files) {
+        assert_eq!(e.path, EntryPath::from(path.as_str()));
+        assert_eq!(e.kind, EntryKind::Regular);
+        assert_eq!(e.body_bytes().unwrap().as_ref(), &bytes[..]);
+        assert_eq!((e.meta.mode, e.meta.mtime), (0o644, Some(0)));
+        let RawMeta::Tar(raw) = &e.raw else {
+            panic!("{path} came back as a zip entry");
+        };
+        assert_eq!(raw.typeflag, b'0', "{path}");
+        assert!(raw.pax.is_empty() && raw.linkname.is_empty(), "{path}");
+    }
 }
 
 #[test]

@@ -25,13 +25,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
+use base64::Engine as _;
 use sha2::Digest as _;
 use trigon_attest::config::{AddedBy, EvidenceConfig, Source, read_checkpoint_file};
 use trigon_attest::evidence::Repository;
 use trigon_attest::location::{Location, Transport, printable};
 use trigon_attest::log::{
-    DirFiles, LogError, LogFiles as _, VerifiedLog, VerifiedSource, compare_chains,
-    verify_continuation, verify_source,
+    Checkpoint, DirFiles, LogError, LogFiles as _, VerifiedLog, VerifiedSource, compare_chains,
+    holds_no_log, verify_continuation, verify_source,
 };
 use trigon_attest::state::{self, FirstUse, KeysFile, StateError, SyncRecord, UNACCEPTED, UrlSeen};
 use trigon_attest::{AttestationKey, LogVkey};
@@ -138,6 +139,32 @@ impl Opened {
             })
             .collect()
     }
+
+    /// The checkpoint answers are given from: the last log's, which a sync accepts.
+    #[cfg(feature = "build")]
+    pub(crate) fn checkpoint_of(&self) -> &Checkpoint {
+        self.last().checkpoint().checkpoint()
+    }
+}
+
+/// What every report that answers from a source prints beside it (`docs/19` §6): the checkpoint
+/// the answer was given from, as `checkpoint <origin> <size> <root>` — the three lines of its note
+/// on one, the root spelled as the note spells it. A log has one tree at each size, so two people
+/// whose lines for one origin at one size differ have been shown two logs, a split view: the line
+/// is what they paste to each other to find out.
+pub(crate) fn checkpoint_line(c: &Checkpoint) -> String {
+    format!("checkpoint {} {} {}", c.origin, c.size, root_said(c))
+}
+
+/// [`checkpoint_line`], as `--output json` carries it.
+pub(crate) fn checkpoint_json(c: &Checkpoint) -> serde_json::Value {
+    serde_json::json!({ "origin": c.origin, "size": c.size, "root": root_said(c) })
+}
+
+/// A checkpoint's root as its note spells it: padded standard base64, the one spelling a
+/// checkpoint's third line can have and be read at all (`trigon_attest::log::Checkpoint::parse`).
+fn root_said(c: &Checkpoint) -> String {
+    base64::engine::general_purpose::STANDARD.encode(c.root)
 }
 
 /// Why a source could not be synced or opened.
@@ -328,12 +355,13 @@ impl Lost {
                 None => format!("the log is then held only to {held_to}"),
             },
             (false, _) => "its keys are then read again from `keys/` of the first location \
-                 reached, as a first contact reads them, and the checkpoint last accepted, which \
-                 is kept, must open under them and be extended: a log under other keys is refused"
+                 reached that holds a log, as a first contact reads them, and the checkpoint last \
+                 accepted, which is kept, must open under them and be extended: a log under other \
+                 keys is refused"
                 .into(),
             (true, true) => format!(
-                "its keys are then read again from `keys/` of the first location reached, as a \
-                 first contact reads them, and the log is held only to {held_to}"
+                "its keys are then read again from `keys/` of the first location reached that \
+                 holds a log, as a first contact reads them, and the log is held only to {held_to}"
             ),
         }
     }
@@ -400,7 +428,8 @@ pub(crate) fn open(source: &Source, dirs: &Dirs) -> Result<Opened, Failed> {
 
 /// The keys the chain is verified from: those the source pins; for a key it does not, the one its
 /// first sync read and recorded; and on a first sync of a source trusting on first use, the one in
-/// `keys/` of the first location reached, with a line saying so.
+/// `keys/` of the first location reached that holds a log, with a line saying so, and one for each
+/// location passed over for serving no log at all.
 pub(crate) fn start_keys(
     source: &Source,
     held: Option<&KeysFile>,
@@ -437,17 +466,38 @@ pub(crate) fn start_keys(
         ));
     }
     // First contact: the keys the repository publishes, from the first location that could be
-    // reached, which every later sync is then pinned by.
-    let reached = source.urls.iter().zip(first).find_map(|(l, r)| match r {
-        Reached::Copy { dir, .. } => Some((l, dir)),
-        Reached::Missing(_) => None,
-    });
+    // reached and holds a log, which every later sync is then pinned by. One that serves no log at
+    // all — a mistyped URL, a repository nothing has been published to — is passed over, as `pick`
+    // sets it aside, rather than stopping the sync before a location that does hold one is read.
+    let mut notes = Vec::new();
+    let mut reached = None;
+    for (l, r) in source.urls.iter().zip(first) {
+        let Reached::Copy { dir, .. } = r else {
+            continue;
+        };
+        if holds_no_log(dir) {
+            notes.push(format!(
+                "{l} serves no log at all, so no key is read from its keys/ to trust on first use"
+            ));
+            continue;
+        }
+        reached = Some((l, dir));
+        break;
+    }
     let Some((location, dir)) = reached else {
-        return Err(Failed::unreadable(anyhow!(
-            "`{}` trusts on first use, and no location of it could be reached to read its keys \
-             from",
-            source.name
-        )));
+        return Err(Failed::unreadable(match notes.is_empty() {
+            true => anyhow!(
+                "`{}` trusts on first use, and no location of it could be reached to read its \
+                 keys from",
+                source.name
+            ),
+            false => anyhow!(
+                "`{}` trusts on first use, and no location of it that could be reached holds a \
+                 log to read its keys from: {}",
+                source.name,
+                notes.join("; ")
+            ),
+        }));
     };
     let files = DirFiles::new(dir);
     let read = |path: &str| -> Result<String, Failed> {
@@ -487,11 +537,11 @@ pub(crate) fn start_keys(
             attestation.key_id()
         ),
     };
-    let said = format!(
+    notes.push(format!(
         "trusting on first use: {read} read from {location}'s keys/ and recorded, and every \
          answer from `{}` rests on them",
         source.name
-    );
+    ));
     Ok((
         StartKeys {
             log,
@@ -501,7 +551,7 @@ pub(crate) fn start_keys(
                 at: now,
             }),
         },
-        vec![said],
+        notes,
     ))
 }
 
@@ -640,7 +690,8 @@ pub(crate) fn chain(
 /// Verify the copy at each location of one repository with `verify`, hold every copy that
 /// verifies to every other (`docs/19` §6.1), and return the largest's clone and part of the chain.
 /// A copy that fails verification refuses the source; one that could not be reached or read is
-/// said, and the others answer.
+/// said, and the others answer. A copy with no log at all is one that could not be read, said with
+/// a note naming its URL; one with a checkpoint that does not open is one that fails.
 fn pick(
     locations: &[Location],
     reached: Vec<Reached>,
@@ -674,6 +725,21 @@ fn pick(
                         e,
                         format!("the evidence repository at {l} does not verify"),
                     ));
+                }
+                // No log at all, which is not a log that fails to verify: set aside, and said
+                // loudly, since the likeliest cause is a URL that names the wrong repository.
+                Err(e @ LogError::NoLog(_)) => {
+                    let why = printable(&format!(
+                        "its log could not be read: {e}. A mistyped URL, or a repository nothing \
+                         has been published to yet, serves no log at all"
+                    ));
+                    notes.push(format!(
+                        "{l} serves no log at all, and is set aside while the other locations \
+                         answer: check the URL, since a mistyped one, or a repository nothing has \
+                         been published to yet, looks like this"
+                    ));
+                    missing.push(format!("{l}: {why}"));
+                    urls.push(seen(l, None, "unreachable", Some(why)));
                 }
                 Err(e) => {
                     let why = printable(&format!("its log could not be read: {e}"));

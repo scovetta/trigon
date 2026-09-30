@@ -279,8 +279,9 @@ fn a_rebuild_refused_for_its_model_or_ecosystem_still_leaves_its_record() {
 }
 
 /// The same failure over and over with nothing succeeding between them is a wall rather than a
-/// set of findings. The sweep stops at it with every row so far written, and the same command
-/// resumes where it stopped.
+/// set of findings. The sweep stops at it with every row so far written, prints its summary, exits
+/// 3 so a scheduler can tell it from a finished sweep, and the same command resumes where it
+/// stopped.
 #[test]
 fn a_run_of_identical_failures_stops_the_sweep_and_the_same_command_resumes_it() {
     let d = dir("wall");
@@ -292,6 +293,16 @@ fn a_run_of_identical_failures_stops_the_sweep_and_the_same_command_resumes_it()
         "{err}"
     );
     assert!(!err.contains("panicked"), "{err}");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stopped early, resumable: {err}"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("\n  2 targets\n"),
+        "the summary is still printed: {text}"
+    );
     let rows = results(&d);
     assert_eq!(
         rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
@@ -329,11 +340,14 @@ fn the_wall_counts_only_an_unbroken_run_and_zero_turns_it_off() {
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("in a row"));
     assert_eq!(results(&d).len(), 5);
+    // Nothing stopped it, so it exits as a finished sweep does, whatever its rows say.
+    assert_eq!(out.status.code(), Some(0));
 
     let d = dir("wall-off");
     let out = sweep(&d, "bad-1\nbad-2\nbad-3\nbad-4\n", &["--wall", "0"]);
     assert!(!String::from_utf8_lossy(&out.stderr).contains("in a row"));
     assert_eq!(results(&d).len(), 4);
+    assert_eq!(out.status.code(), Some(0));
 }
 
 /// A targets file with nothing in it but comments is refused, not reported as a sweep of nothing.

@@ -17,7 +17,7 @@ use super::cmd::{self, Cmd};
 use super::recipe::{
     BuildPublishLink, CiRecipe, CiStep, Decline, RunnerSpec, StepPhase, ToolPin, VersionSpec,
 };
-use crate::heuristic::{bare_program, is_plain_version};
+use crate::heuristic::{bare_program, is_plain_version, pypi_build, pypi_deps, pypi_kind};
 use crate::infer::{Candidate, Derivation, confidence_of};
 use crate::model::ResolvedTarget;
 
@@ -425,7 +425,29 @@ fn lower_pypi(
         }
     };
 
-    let mut deps = BTreeMap::from([("venv".to_string(), trigon_strategy::VENV.to_string())]);
+    // **The workflow has to have built what this run compares.** A job whose every build command
+    // names the other distribution — `python -m build --wheel` in a run about the sdist — never
+    // built the artifact under test, so nothing in it says how that was built. A recipe lowered
+    // from it would still displace the heuristic's candidate, which is the confident wrong answer
+    // B11 is about. The evidence the workflow gave is already collected, and reaches the rungs
+    // below either way.
+    let wanted = pypi_kind(ctx.target);
+    let kinds: Vec<&[&'static str]> = build
+        .builds
+        .iter()
+        .map(kinds_built)
+        .filter(|k| !k.is_empty())
+        .collect();
+    if let Some(first) = kinds.first()
+        && kinds.iter().all(|k| !k.contains(&wanted))
+    {
+        return Err(Decline::WorkflowBuildsAnotherKind {
+            built: first[0],
+            wanted,
+        });
+    }
+
+    let mut deps = pypi_deps(ctx.target);
 
     // The interpreter, from the workflow if it pinned one and from `uv build --python` otherwise.
     let python = recipe
@@ -484,6 +506,13 @@ fn lower_pypi(
     let project_dir = dir.filter(|d| d != ".");
     let output = outdir.unwrap_or_else(|| "dist".into());
 
+    // What every PyPI recipe is built with, taken from where the heuristic takes it, so the two
+    // rungs cannot drift apart again: the kind of distribution the run compares, the venv, the
+    // constraints file that carries the backend pin and the exclusion of the artifact under test,
+    // and isolation left on. The directory is the one thing here the workflow says.
+    let mut with = pypi_build(ctx.target);
+    with.insert("dir".to_string(), project_dir.unwrap_or_default());
+
     Ok(Strategy::Flow(FlowStrategy {
         location: Location {
             repo: ctx.repo.to_string(),
@@ -492,45 +521,29 @@ fn lower_pypi(
         },
         src: vec![uses("git-checkout", BTreeMap::new(), Vec::new())],
         deps: vec![uses("pypi/deps/basic", deps, Vec::new())],
-        build: vec![uses(
-            "pypi/build/wheel",
-            BTreeMap::from([
-                (
-                    "locator".to_string(),
-                    format!("{}/bin/", trigon_strategy::VENV),
-                ),
-                (
-                    "constraints".to_string(),
-                    backend
-                        .as_ref()
-                        .map(|_| format!("{}/constraints.txt", trigon_strategy::VENV))
-                        .unwrap_or_default(),
-                ),
-                // Isolation stays on for the same reason it does in the heuristic: `-n` makes the
-                // frontend check for each declared build requirement rather than install it, and a
-                // project needing anything beyond the backend stops with "Unmet dependencies".
-                ("no_isolation".to_string(), "false".to_string()),
-                ("dir".to_string(), project_dir.unwrap_or_default()),
-                // **Build what will be compared**, as the heuristic does. The caller names the
-                // artifact the run is about, and for a package with only platform wheels that is
-                // the sdist; the tool defaults to a wheel, so without this a CI-derived recipe
-                // built a wheel and the run compared it against an sdist.
-                (
-                    "kind".to_string(),
-                    match ctx.target.about.as_ref().map(|a| a.kind()) {
-                        Some(trigon_core::ArtifactKind::Sdist) => "sdist".to_string(),
-                        _ => "wheel".to_string(),
-                    },
-                ),
-            ]),
-            build.system_deps.clone(),
-        )],
+        build: vec![uses("pypi/build/wheel", with, build.system_deps.clone())],
         output_dir: Some(match &subdir {
             Some(d) => format!("{}/{output}", d.trim_end_matches('/')),
             None => output,
         }),
         output_path: None,
     }))
+}
+
+/// The distributions one Python build command writes, as `pypi/build/wheel` names them; nothing
+/// for a command that is not one. Neither flag means both, as it does to the frontend:
+/// `python -m build` writes an sdist and then a wheel from it.
+fn kinds_built(c: &Cmd) -> &'static [&'static str] {
+    match c {
+        Cmd::PyBuild { wheel, sdist, .. } | Cmd::UvBuild { wheel, sdist, .. } => {
+            match (*wheel, *sdist) {
+                (true, false) => &["wheel"],
+                (false, true) => &["sdist"],
+                _ => &["sdist", "wheel"],
+            }
+        }
+        _ => &[],
+    }
 }
 
 fn lower_npm(

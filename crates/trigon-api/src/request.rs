@@ -50,6 +50,12 @@ fn refuse(status: StatusCode, code: &str, detail: &str) -> Response {
 /// Returns `None` for anonymous, which every read route already handles. A *wrong* token is not
 /// anonymous: it is a 401, because somebody who presented a credential and was treated as the
 /// public would spend a long time wondering why their quota never moved.
+///
+/// **An `Authorization` header of another scheme is anonymous, not a 401.** It is not a credential
+/// for this API: `Basic` is what a password-protected proxy in front of the site sends, and it is
+/// addressed to the proxy. Refusing it would refuse every read behind such a proxy, and nobody
+/// holding it is quietly treated as the public where it matters: asking for a rebuild without a
+/// principal is `authentication_required`, and `/v1/me` answers `principal: null`.
 async fn who(api: &Api, headers: &HeaderMap) -> Result<Option<trigon_store::Principal>, Response> {
     let Some(raw) = headers
         .get(header::AUTHORIZATION)

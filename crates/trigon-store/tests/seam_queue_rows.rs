@@ -293,6 +293,70 @@ async fn a_run_recorded_without_a_job_is_one_row_that_keeps_the_two_denominators
     assert!(q.depth().await.unwrap().is_empty());
 }
 
+/// A run row's state, outcome, record and version, read back.
+async fn run_row(pool: &sqlx::SqlitePool, id: &str) -> (String, Option<String>, String, i64) {
+    use sqlx::Row as _;
+    let r = sqlx::query("SELECT state, outcome, record_ref, version FROM run WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (
+        r.get("state"),
+        r.get("outcome"),
+        r.get("record_ref"),
+        r.get("version"),
+    )
+}
+
+/// A finished run is not moved back by a record of an earlier state arriving late, and another
+/// finished record of it still lands.
+///
+/// The upsert used to overwrite whatever the row held, so a stale `building` copy written after
+/// the run finished erased its outcome and its record.
+#[tokio::test]
+async fn a_finished_run_is_not_moved_back_by_a_late_record_of_an_earlier_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "backwards").await;
+    let pool = raw(&dir, "backwards").await;
+    let finished = |version: i64| {
+        (
+            "done".to_string(),
+            Some("divergent".to_string()),
+            "aa".to_string(),
+            version,
+        )
+    };
+
+    let done = record("r-1", "pkg:npm/left-pad@1.3.0", Some("divergent"));
+    q.record(&done, "aa").await.unwrap();
+    let mut stale = record("r-1", "pkg:npm/left-pad@1.3.0", None);
+    stale.state = RunState::Building;
+    q.record(&stale, "bb").await.unwrap();
+    // Nor is the update it refused counted.
+    assert_eq!(run_row(&pool, "r-1").await, finished(1));
+
+    // The same finished record again is taken, and is still the same run.
+    q.record(&done, "aa").await.unwrap();
+    assert_eq!(run_row(&pool, "r-1").await, finished(2));
+
+    // A run that has not finished moves forward as before.
+    let mut early = record("r-2", "pkg:npm/left-pad@1.3.0", None);
+    early.state = RunState::Building;
+    q.record(&early, "cc").await.unwrap();
+    let later = record("r-2", "pkg:npm/left-pad@1.3.0", Some("exact"));
+    q.record(&later, "dd").await.unwrap();
+    assert_eq!(
+        run_row(&pool, "r-2").await,
+        (
+            "done".to_string(),
+            Some("exact".to_string()),
+            "dd".to_string(),
+            2
+        )
+    );
+}
+
 /// Which workers hold work right now, and how soon each one's earliest lease runs out.
 #[tokio::test]
 async fn the_fleet_can_see_which_worker_holds_what_and_until_when() {

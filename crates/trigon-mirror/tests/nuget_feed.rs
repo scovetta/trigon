@@ -31,6 +31,8 @@ async fn get(addr: &std::net::SocketAddr, path: &str) -> (u16, String) {
 
 /// A moment long after every version below, so the filter is not what removes them.
 const NOW: &str = "2030-01-01T00:00:00Z";
+/// `NOW` as the filter applies it, which is how every URL the mirror serves spells it.
+const NOW_APPLIED: &str = "2030-01-01T00:00:00";
 /// Before Newtonsoft.Json 12 and after 11.0.1.
 const EARLY_2018: &str = "2018-06-01T00:00:00Z";
 
@@ -53,7 +55,10 @@ async fn the_service_index_points_every_resource_back_at_this_mirror() {
             "resource {} points off the mirror: {id}",
             r["@type"]
         );
-        assert!(id.contains(NOW), "resource {id} lost the moment");
+        assert!(
+            id.starts_with(&format!("http://{}/-nuget/{NOW_APPLIED}/", m.addr)),
+            "resource {id} does not name the moment the filter applied"
+        );
     }
 
     // Both resources a restore needs.

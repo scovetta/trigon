@@ -446,6 +446,15 @@ pub enum Decline {
     BuildJobRunsNoBuild {
         job: String,
     },
+    /// Every build command in the job writes only the other Python distribution: `python -m build
+    /// --wheel` in a run about the sdist, or `--sdist` in one about a wheel. The workflow never
+    /// built the artifact under test, so it cannot say how that was built, and a recipe lowered
+    /// from it would displace the heuristic's with a build nobody ran. `built` and `wanted` are
+    /// `pypi/build/wheel`'s names for the two, `wheel` and `sdist`.
+    WorkflowBuildsAnotherKind {
+        built: &'static str,
+        wanted: &'static str,
+    },
     /// The build is one action we are not willing to guess at. `attrs` is exactly this:
     /// `hynek/build-and-inspect-python-package` *is* the build, and ADR-0009 says we flag rather
     /// than execute an unknown action to find out what it does.
@@ -555,6 +564,11 @@ impl std::fmt::Display for Decline {
                 f,
                 "`{job}` was selected as the job that built this release and runs no step this \
                  rung recognises as a build"
+            ),
+            Decline::WorkflowBuildsAnotherKind { built, wanted } => write!(
+                f,
+                "every build command in the job builds only the {built}, and this run needs the \
+                 {wanted}, so the workflow never built what a recipe from it would build"
             ),
             Decline::BuildIsOneUnmodelledStep { action } => write!(
                 f,
@@ -741,6 +755,13 @@ mod tests {
             (
                 Decline::BuildJobRunsNoBuild { job: "tag".into() },
                 "`tag` was selected",
+            ),
+            (
+                Decline::WorkflowBuildsAnotherKind {
+                    built: "wheel",
+                    wanted: "sdist",
+                },
+                "builds only the wheel, and this run needs the sdist",
             ),
             (
                 Decline::BuildIsOneUnmodelledStep {

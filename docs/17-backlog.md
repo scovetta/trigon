@@ -1022,6 +1022,21 @@ now:
   did to the artifact between download and upload was invisible.
   `Decline::ArtifactChangedAfterTheBuild`.
 
+Two more, found since and fixed the same way. The PyPI lowering had kept the heuristic's shape from
+before `exclude_self`: no exclusion of the artifact under test, and no constraints file unless a
+backend was read. It now takes the parameters every PyPI recipe carries from the functions the
+heuristic uses
+(`a_ci_recipe_keeps_the_artifact_under_test_out_of_its_own_build_as_the_heuristic_does`). And a job
+whose every build command builds only the other distribution, `--wheel` in a run about the sdist,
+declines with `WorkflowBuildsAnotherKind` and keeps its evidence
+(`a_workflow_that_built_only_the_other_kind_declines_and_still_gives_its_evidence`).
+
+**One thing to add when it is wired.** `resolve_toolchain` skips a version it cannot parse and says
+nothing, because `ToolchainResolution` has nowhere to say it: evidence that was all unreadable comes
+back `Unconstrained`, the same as none. Nothing reaches the skip today. Workflow text is where
+unreadable versions will come from, so the result needs a `skipped` list first, for an escalation to
+say that evidence was there and could not be read.
+
 **Still not wired, and the remaining condition is the reason.** Both verification angles have to
 come back `sound` against the fixed rung before `ladder()` in `crates/trigon/src/main.rs` calls it —
 between the heuristic and the model, per [`01`](01-architecture.md) §3. The eight above were found
@@ -1275,20 +1290,32 @@ removed the client, `check_log_entry` and the stored entry (docs/19 §10 phase 1
 
 ### `trigon-ai`
 
-- **high** — Copilot's stdout/stderr pipes are never drained until the child exits, so a large answer deadlocks until the 600s deadline  
-  `trigon-ai/src/copilot.rs:183`
-- **high** — OpenAI-compatible provider never inspects `finish_reason`, so truncation is misreported as `Malformed` (or silently accepted) while Anthropic raises `Truncated`  
-  `trigon-ai/src/http.rs:307`
-- **medium** — `strip_fence` only strips a fence at byte 0, so a "prose, then ```yaml block```" answer is discarded  
-  `trigon-ai/src/builder.rs:250`
-- **low** — Copilot's injection fence encloses our own prelude, tool vocabulary and operator constraints, labelling them as package-written text  
-  `trigon-ai/src/copilot.rs:92`
-- **low** — The whole prompt is one argv entry, so a repository with large manifests makes the Copilot provider fail to spawn  
-  `trigon-ai/src/copilot.rs:154`
-- **low** — The Copilot agent's working directory is a fixed shared-temp path, never emptied and created through symlinks  
-  `trigon-ai/src/copilot.rs:70`
-- **low** — A replayed transcript with a short `prompt_sha256` panics instead of reporting a mismatch  
-  `trigon-ai/src/transcript.rs:238`
+- **low** — The whole prompt is one argv entry, so a prompt over the 128 KiB Linux passes in one
+  argument cannot reach the Copilot CLI. It now fails before the spawn with `PromptTooLarge`, which
+  names both sizes, is not retried and does not say to install the CLI
+  (`a_prompt_longer_than_one_argument_is_refused_before_anything_runs`). Still open because the fix
+  is to hand the prompt over another way, on stdin or in a file, and whether the CLI takes it that
+  way is something only the real CLI can show  
+  `trigon-ai/src/copilot.rs:180`
+- **low** — Copilot's injection fence encloses our own prelude, tool vocabulary and operator
+  constraints, labelling them as package-written text. Left as it is: the fence follows `Prompt`'s
+  split, which is stable against volatile for caching rather than ours against the package's, and
+  the volatile parts hold our own repair framing too. What to fence is a design decision the prompt
+  type cannot make until it records where each part came from  
+  `trigon-ai/src/copilot.rs:102`
+- **low** — The Copilot agent's working directory is a fixed shared-temp path, never emptied and
+  created through symlinks. Left as it is: only another local user can put anything there, and
+  [`threat-model.md`](threat-model.md) §1.10 has no such adversary. The one inert tool and
+  `--no-custom-instructions` leave the model nothing there to read or act on  
+  `trigon-ai/src/copilot.rs:79`
+
+Removed as fixed, each with the test that holds it: the Copilot CLI's pipes are read while it runs
+(`an_answer_larger_than_a_pipe_is_read_rather_than_waited_out`); an OpenAI-shaped answer that
+stopped at the output cap is `Truncated`, neither malformed nor accepted
+(`an_answer_cut_off_at_the_output_cap_is_truncated_rather_than_malformed_or_accepted`);
+`strip_fence` finds a fence after prose (`a_fence_after_prose_is_still_a_fence`); and a transcript
+whose recorded `prompt_sha256` is short is refused rather than panicking
+(`a_recording_whose_digest_is_not_one_is_refused_rather_than_panicking`).
 
 ### `trigon-store`
 

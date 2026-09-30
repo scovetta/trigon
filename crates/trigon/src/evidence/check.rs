@@ -39,6 +39,7 @@ use super::lookup::{
     source_json, weighed, worst,
 };
 use super::remote::{self, Http};
+use super::{checkpoint_json, checkpoint_line};
 
 /// What `trigon check` is given when it answers from the evidence sources.
 pub(crate) struct Args {
@@ -345,6 +346,9 @@ fn text(args: &Args, via: Via, askers: &[Asker<'_>], rows: &[Row], code: u8) {
     );
     for a in askers {
         println!("source    {}", style::wrap(&a.label, 10));
+        if let Some(c) = &a.checkpoint {
+            println!("{}", checkpoint_line(c));
+        }
         for n in &a.notes {
             println!("note      {}", style::wrap(&printable(n), 10));
         }
@@ -552,6 +556,7 @@ fn as_json(
         "sources": askers.iter().map(|a| json!({
             "name": a.name,
             "label": a.label,
+            "checkpoint": a.checkpoint.as_ref().map(checkpoint_json),
             "required": a.required,
             "projectFile": a.project_file,
             "trustOnFirstUse": a.first_use,
@@ -715,6 +720,7 @@ fn sarif(args: &Args, askers: &[Asker<'_>], rows: &[Row], code: u8) -> Value {
                 json!({
                     "name": a.name,
                     "label": a.label,
+                    "checkpoint": a.checkpoint.as_ref().map(checkpoint_json),
                     "required": a.required,
                     "said": said_word(&x.said),
                     "foundBy": x.by,
@@ -804,6 +810,7 @@ fn sarif(args: &Args, askers: &[Asker<'_>], rows: &[Row], code: u8) -> Value {
                 "sources": askers.iter().map(|a| json!({
                     "name": a.name,
                     "label": a.label,
+                    "checkpoint": a.checkpoint.as_ref().map(checkpoint_json),
                     "standing": a.standing,
                     "why": a.why,
                 })).collect::<Vec<_>>(),

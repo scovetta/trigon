@@ -279,7 +279,7 @@
   <section class="sec" id="result" aria-labelledby="result-title">
     <div class="sec-head">
       <h2 id="result-title">One run, start to finish</h2>
-      <p>Output from one run of <code>scripts/evidence-e2e.sh</code> on wrappy 1.0.2.</p>
+      <p>Output from one run of <code>scripts/evidence-e2e.sh pkg:npm/wrappy@1.0.2</code>.</p>
     </div>
     <div class="sec-body">
       <div class="prose">
@@ -800,14 +800,16 @@ verified  NO — the record failed verification: no leaf of the log names the re
         <div class="step">
           <h3>Run the whole loop</h3>
           <p><code>scripts/evidence-e2e.sh</code> creates keys and a local evidence repository,
-            rebuilds a package behind the mirror, confirms it with a second cold build, publishes the
-            verdict, then checks it the way a consumer would, including two checks that must fail. It
-            needs the base image from the step above, and builds the mirror image itself if it is
-            missing. It takes a few minutes, needs <code>podman</code> and the network the mirror
-            fetches through, and keeps everything it makes in <code>work/evidence-e2e/</code>.</p>
+            rebuilds the package you name behind the mirror, confirms it with a second cold build,
+            publishes the verdict, then checks it the way a consumer would, including two checks that
+            must fail. The package has no default: <code>pkg:npm/wrappy@1.0.2</code> is small and
+            reproduces behind the mirror. The script needs the base image from the step above, and
+            builds the mirror image itself if it is missing. It takes a few minutes, needs
+            <code>podman</code> and the network the mirror fetches through, and keeps everything it
+            makes in <code>work/evidence-e2e/</code>.</p>
           <figure class="term">
             <div class="term-box">
-<pre tabindex="0" role="region" aria-label="End-to-end command"><code><span class="t-cmd">cargo build -p trigon &amp;&amp; scripts/evidence-e2e.sh</span></code></pre>
+<pre tabindex="0" role="region" aria-label="End-to-end command"><code><span class="t-cmd">cargo build -p trigon &amp;&amp; scripts/evidence-e2e.sh pkg:npm/wrappy@1.0.2</span></code></pre>
             </div>
           </figure>
         </div>

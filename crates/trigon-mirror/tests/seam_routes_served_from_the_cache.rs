@@ -757,7 +757,8 @@ async fn a_registration_is_filtered_across_every_page_and_points_back_at_this_mi
         &nupkg,
     );
     let m = serve(&root, None).await;
-    let base = format!("http://{}/-nuget/2020-01-01T00:00:00Z", m.host());
+    // The moment as the filter applied it, not as the client spelled it.
+    let base = format!("http://{}/-nuget/2020-01-01T00:00:00", m.host());
 
     // Asked for in the case the project file spells it; the feed's own URLs are lowercased.
     let r = get(
@@ -1042,7 +1043,7 @@ async fn the_service_index_points_every_resource_back_here_and_each_one_answers(
     );
     let m = serve(&root, None).await;
     let moment = "2020-01-01T00:00:00Z";
-    let base = format!("http://{}/-nuget/{moment}/", m.host());
+    let base = format!("http://{}/-nuget/2020-01-01T00:00:00/", m.host());
 
     let r = get(&m, &format!("/-nuget/{moment}/index.json"), None, None).await;
     assert_eq!(r.status, 200, "{}", r.text());
@@ -1198,6 +1199,25 @@ async fn a_nuget_moment_that_will_not_parse_is_refused_rather_than_compared() {
     .await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json(), json!({ "versions": ["1.0.0", "2.0.0"] }));
+
+    // And every URL it serves, and the transcript row of each, names the moment the filter
+    // applied, not the offset and fraction the client wrote, as the Cargo route's `dl` does.
+    let applied = format!("http://{}/-nuget/2019-01-01T00:00:00/", m.host());
+    let r = get(
+        &m,
+        "/-nuget/2019-01-01T00:00:00.500+00:00/index.json",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    for resource in r.json()["resources"].as_array().expect("resources") {
+        let id = resource["@id"].as_str().unwrap();
+        assert!(id.starts_with(&applied), "{id}");
+    }
+    let rows = m.seen().exchanges();
+    let row = rows.last().expect("the service index is a row");
+    assert_eq!(row.url, format!("{applied}index.json"));
 
     m.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);

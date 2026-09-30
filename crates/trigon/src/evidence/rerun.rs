@@ -231,6 +231,7 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
                 (4, false, false) => Some(Cause::SourceUnknown),
                 _ => Some(Cause::NoCurrentRecord),
             },
+            asked: answering(&named, &said),
         });
     }
 
@@ -308,6 +309,12 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         if let Some(n) = evidence.said() {
             d.note(n);
         }
+        // Every other source asked answers from a checkpoint of its own, and is weighed too.
+        for other in answering(&named, &said) {
+            if other.name != r.source.name {
+                d.also_asked(other);
+            }
+        }
         done.push(d);
     }
     let code = first_that_wins(
@@ -356,6 +363,23 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         }
     }
     Ok(i32::from(code))
+}
+
+/// Every source asked that answers from a checkpoint — its clones opened — with what it says of the
+/// artifact and that checkpoint, in the order asked: what a report prints of each (`docs/19` §6).
+fn answering(named: &[&Ready], said: &[Said]) -> Vec<verify_record::AlsoAsked> {
+    named
+        .iter()
+        .zip(said)
+        .filter_map(|(r, s)| {
+            Some(verify_record::AlsoAsked {
+                name: r.source.name.clone(),
+                label: r.label(),
+                said: super::lookup::said_word(s),
+                checkpoint: r.opened.as_ref()?.checkpoint_of().clone(),
+            })
+        })
+        .collect()
 }
 
 /// The sources that may hold the log `origin` names, by name: those whose pinned log key has that

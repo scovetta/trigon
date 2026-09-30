@@ -5,17 +5,23 @@
 //! all: the set the claim was made under no longer exists anywhere they can run. The manifest
 //! (`trigon_stabilize::SetManifest`) tells them *what* that set was. This lets them *run* it.
 //!
-//! **A core module, not a component.** `docs/09-attestations.md` §7.1 says "WASM component", which
-//! means `wasm32-wasip2`, WIT definitions and `cargo-component`. A core module compiled for
+//! **A core module, not a component.** `docs/09-attestations.md` §7.1 planned a "WASM component",
+//! which means `wasm32-wasip2`, WIT definitions and `cargo-component`. A core module compiled for
 //! `wasm32-unknown-unknown` gets the whole benefit — an archived set that executes — with a host
 //! that needs no WASI implementation and a toolchain that is one `rustup target add`. What it gives
 //! up is a typed interface for guests written in other languages, which matters only once somebody
 //! writes one. The substitution is recorded in `docs/16-findings.md`.
 //!
+//! **Every published verdict names one**, by the sha256 of its bytes
+//! (`evidence.stabilizerSetModule`), and `scripts/build-set-module.sh` builds it reproducibly, so
+//! anyone can rebuild the module a verdict names from the commit it says it was built from
+//! ([`trigon_source_commit`]) and compare.
+//!
 //! The guest is pure and total by construction: no clock, no network, no filesystem, no ambient
 //! anything. That is what made stabilizers the right first WASM guest
 //! ([`01-architecture.md`](../../../docs/01-architecture.md) §4), and it is why the ABI below can be
-//! four functions over a byte buffer rather than an interface description.
+//! three functions over the module's exported memory rather than an interface description, with a
+//! fourth appended since: the commit the module was built from.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -33,9 +39,9 @@ use trigon_core::Format;
 /// Reserve `len` bytes in the guest and return a pointer the host can write to.
 ///
 /// The host cannot allocate inside the guest's linear memory itself, so every call starts here.
-/// `Vec::leak` rather than `into_raw_parts` because the guest never frees: a module instance handles
-/// one comparison and is dropped, and an allocator that tracked ownership across the boundary would
-/// be a second thing to get wrong for no benefit.
+/// `Vec::leak` rather than `into_raw_parts` because the guest never frees: the host makes an
+/// instance for each artifact it stabilizes and drops it after, and an allocator that tracked
+/// ownership across the boundary would be a second thing to get wrong for no benefit.
 #[unsafe(no_mangle)]
 pub extern "C" fn trigon_alloc(len: u32) -> u32 {
     let v = vec![0u8; len as usize];
@@ -106,6 +112,29 @@ pub unsafe extern "C" fn trigon_set_digest(profile: u32, profile_len: u32) -> u6
     let len = bytes.len() as u64;
     let ptr = Box::leak(bytes.into_boxed_slice()).as_mut_ptr() as u64;
     (ptr << 32) | len
+}
+
+/// The commit this module was built from, as UTF-8 at the returned pointer, or `0` where its build
+/// named none.
+///
+/// `scripts/build-set-module.sh` names it in `TRIGON_SET_MODULE_COMMIT`, as `git rev-parse HEAD`
+/// gives it, with `.dirty` after it when the tree has changes the commit does not, as the binary's
+/// own version does; a plain `cargo build` names none. Appended to the ABI after the three above,
+/// so a module built before it exports no such function, and a host reads the absence as no commit
+/// named.
+///
+/// It is the module's word about itself, as its set digest is, and it says where to start: a
+/// verifier who would rather not run the module a verdict names rebuilds it from this commit and
+/// compares the sha256 with the one the verdict signs. A module that named another commit than the
+/// one it was built from is caught by exactly that comparison.
+#[unsafe(no_mangle)]
+pub extern "C" fn trigon_source_commit() -> u64 {
+    match option_env!("TRIGON_SET_MODULE_COMMIT") {
+        Some(commit) if !commit.is_empty() => {
+            ((commit.as_ptr() as u64) << 32) | commit.len() as u64
+        }
+        _ => 0,
+    }
 }
 
 /// The shared implementation, callable natively so the equality test has something to compare

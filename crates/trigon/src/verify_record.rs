@@ -15,7 +15,9 @@
 //! Repository::open`); the record against its leaf, the key its source had at that leaf, and the
 //! evidence files beside it (`check_record`); what the source says of the record's artifact now,
 //! every supersession applied (`lookup`); and, under `--rerun-comparison`, the claim re-derived
-//! from the two artifacts and the published comparison report held to it. It shows the record as
+//! from the two artifacts and the published comparison report held to it — natively, or, where
+//! this binary does not carry the verdict's set, through the stabilizer-set module the record
+//! carries, held to the digest the verdict signs before it runs. It shows the record as
 //! `docs/19` §4.2 has every client show one: with its set, when and which Trigon, the egress tier,
 //! the derivation, and for a verdict the command that would falsify it and where to dispute it.
 //!
@@ -44,6 +46,7 @@ use trigon_attest::{
 };
 use trigon_core::Match;
 
+use crate::clones::{checkpoint_json, checkpoint_line};
 use crate::{OutputFormat, Rerun};
 
 /// `docs/19` §6: any record, log or claim that failed verification, an equivocation, or a source
@@ -78,7 +81,10 @@ pub(crate) fn usage(message: &str) -> ! {
 pub(crate) fn refuse(message: &str, output: OutputFormat) -> ! {
     eprintln!("Error: {message}");
     if output == OutputFormat::Json {
-        println!("{}", pretty(&stopped(CANNOT, &anyhow!("{message}"), None)));
+        println!(
+            "{}",
+            pretty(&stopped(CANNOT, &anyhow!("{message}"), None, &[]))
+        );
     }
     std::process::exit(CANNOT)
 }
@@ -110,7 +116,20 @@ pub(crate) fn run(args: Args<'_>) -> anyhow::Result<()> {
 pub(crate) fn finish(result: Result<i32, Stop>, output: OutputFormat) -> anyhow::Result<()> {
     let code = match result {
         Ok(code) => code,
-        Err(Stop { code, error, cause }) => {
+        Err(Stop {
+            code,
+            error,
+            cause,
+            asked,
+        }) => {
+            // What the sources say is said from their checkpoints: each, under its source, as
+            // every report that answers from a source prints it.
+            if output == OutputFormat::Text {
+                for a in &asked {
+                    println!("source    {}", a.label);
+                    println!("{}", checkpoint_line(&a.checkpoint));
+                }
+            }
             // `--lookup` finding no current record, and answering with what the sources say of the
             // artifact instead, is no failure, and is said as the answer it is, not as an error.
             match code {
@@ -123,7 +142,7 @@ pub(crate) fn finish(result: Result<i32, Stop>, output: OutputFormat) -> anyhow:
             // A JSON reader gets a document on every exit, and most of all on the ones §6 cares
             // about: an equivocation or a log that does not verify stops before any record is read.
             if output == OutputFormat::Json {
-                println!("{}", pretty(&stopped(code, &error, cause)));
+                println!("{}", pretty(&stopped(code, &error, cause, &asked)));
             }
             code
         }
@@ -141,6 +160,9 @@ pub(crate) struct Stop {
     /// What stopped it, where that was a source or no current record: `None` where it was the
     /// tool, a log or a record, which the code and the error say.
     pub cause: Option<Cause>,
+    /// Every source `--lookup` asked that answers from a checkpoint, where it stopped with what
+    /// they say of the artifact instead of a record's report: each with that checkpoint.
+    pub asked: Vec<AlsoAsked>,
 }
 
 /// What stopped a check where it was neither the tool, a log nor a record, as `--output json` names
@@ -193,6 +215,7 @@ pub(crate) fn cannot(error: impl Into<anyhow::Error>) -> Stop {
         code: CANNOT,
         error: error.into(),
         cause: None,
+        asked: Vec::new(),
     }
 }
 
@@ -203,6 +226,7 @@ pub(crate) fn failed(error: impl Into<anyhow::Error>) -> Stop {
         code: FAILED,
         error: error.into(),
         cause: None,
+        asked: Vec::new(),
     }
 }
 
@@ -403,6 +427,10 @@ pub(crate) fn rerun_files(
 /// Everything the report says, gathered before any of it is printed.
 struct Report {
     pinned: String,
+    /// The checkpoint the source answers from: its last log's, as verified.
+    checkpoint: Checkpoint,
+    /// Every other source `--lookup` asked that answers from a checkpoint, each weighed too.
+    others: Vec<AlsoAsked>,
     notes: Vec<String>,
     logs: Vec<(String, u64)>,
     newest: Option<u64>,
@@ -669,6 +697,35 @@ impl Done {
     pub(crate) fn note(&mut self, note: String) {
         self.report.notes.push(note);
     }
+
+    /// Say what another source the command asked answers from, beside the source whose record
+    /// this is.
+    #[cfg(feature = "build")]
+    pub(crate) fn also_asked(&mut self, other: AlsoAsked) {
+        self.report.others.push(other);
+    }
+}
+
+/// A source `--lookup` asked, which it weighs beside the one whose record it checks, or whose
+/// answer it gives where it finds no record to check: its name, its label, what it says of the
+/// artifact, and the checkpoint it says it from.
+pub(crate) struct AlsoAsked {
+    pub name: String,
+    pub label: String,
+    pub said: String,
+    pub checkpoint: Checkpoint,
+}
+
+impl AlsoAsked {
+    /// As `--output json` carries it, in `otherSources` and in a stop's `sources`.
+    fn json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "label": self.label,
+            "said": self.said,
+            "checkpoint": checkpoint_json(&self.checkpoint),
+        })
+    }
 }
 
 /// Check one record against a source's log: everything `docs/19` §4.2 has every client show of it,
@@ -705,6 +762,15 @@ pub(crate) fn report(
     let verified = repo.verify_record_reading(bytes, evidence);
     let mut report = Report {
         pinned: reading.pinned.clone(),
+        checkpoint: source
+            .logs
+            .last()
+            .expect("a source has a log")
+            .log
+            .checkpoint()
+            .checkpoint()
+            .clone(),
+        others: Vec::new(),
         notes,
         logs: source
             .logs
@@ -787,6 +853,9 @@ struct Rederivation {
     /// The published comparison report, held to the re-derivation where there is one to hold it
     /// to and the directory holds it.
     report: Published,
+    /// The stabilizer-set module the claim was re-derived through, and what binds it, where it was
+    /// not the set compiled into this binary.
+    through: Option<String>,
 }
 
 /// What the published comparison report was found to be.
@@ -808,7 +877,9 @@ impl Rederivation {
             Published::Failed(_) => true,
             Published::Unchecked(_) => false,
         };
-        report || self.claim.as_ref().is_ok_and(|d| !d.holds()) || self.claim.is_err()
+        // A claim consistent with what an archived set re-derives is not refuted: see
+        // `crate::print_rederived`, where the exit code this gives it is argued.
+        report || self.claim.as_ref().is_ok_and(Rederived::refuted) || self.claim.is_err()
     }
 }
 
@@ -828,8 +899,52 @@ fn rederive(
             v.statement.predicate_type
         )));
     }
-    let claim = match crate::rederive_files(&v.statement, files) {
-        Ok(d) => Ok(d),
+    // The module the record carries, where this binary does not carry the verdict's set and no
+    // module was given: read again, held to its signed digest again, and run only then. One that is
+    // other bytes now fails, as the report does; one not in the directory is a check not made.
+    let mut published = None;
+    if cfg!(feature = "wasm")
+        && !crate::carries_set(&v.statement)
+        && files
+            .stabilizers
+            .is_none_or(|p| p.extension().is_none_or(|e| e != "wasm"))
+        && let Some(e) = v
+            .evidence
+            .iter()
+            .find(|e| e.name == trigon_attest::evidence_key::STABILIZER_SET_MODULE)
+    {
+        let read = match evidence {
+            Some(files) => read_evidence_from(files, e),
+            None => repo.read_evidence_checked(v.pos, e),
+        };
+        match read {
+            Ok((_, Some(bytes))) => published = Some(bytes),
+            Ok((state, None)) => {
+                return Err(cannot(anyhow!(
+                    "the verdict was made under a stabilizer set this binary does not carry, and \
+                     names the stabilizer-set module sha256:{} that re-derives it, which is {}. \
+                     Fetch {} into the evidence directory, or pass the module with \
+                     --stabilizers <file.wasm>",
+                    e.digest.to_hex(),
+                    state_said(&state),
+                    trigon_attest::evidence::evidence_path(&e.digest)
+                )));
+            }
+            Err(failure) => {
+                return Ok(Rederivation {
+                    claim: Err(failure.to_string()),
+                    report: Published::Unchecked(
+                        "unchecked: the claim did not re-derive, so there is nothing to hold the \
+                         report to"
+                            .into(),
+                    ),
+                    through: None,
+                });
+            }
+        }
+    }
+    let (claim, through) = match crate::rederive_files(&v.statement, files, published) {
+        Ok((d, through)) => (Ok(d), through),
         // A claim the bytes refute fails verification, and is reported in full with the rest of
         // the record; anything else — the wrong file, a set this build does not carry, an
         // artifact that will not parse — is a check not made.
@@ -838,7 +953,7 @@ fn rederive(
                 .is_some_and(|e| e.fails_verification()) =>
         {
             crate::report_fault(&e);
-            Err(printable(&format!("{e:#}")))
+            (Err(printable(&format!("{e:#}"))), None)
         }
         Err(e) => return Err(cannot(e)),
     };
@@ -881,7 +996,11 @@ fn rederive(
         )),
         (None, Ok(_)) => Published::Unchecked("unchecked: the verdict names none".into()),
     };
-    Ok(Rederivation { claim, report })
+    Ok(Rederivation {
+        claim,
+        report,
+        through,
+    })
 }
 
 /// The record's own answer and, under `--rerun-comparison`, whether its claim held: the most
@@ -1037,7 +1156,20 @@ pub(crate) fn signed_fields(v: &VerifiedRecord) -> Vec<(&'static str, String)> {
 }
 
 fn print_text(r: &Report) {
+    print_record(r);
+    // Each other source asked, under its own name, with the checkpoint it says what it says from,
+    // as a stop prints every source it asked: a line with no name could not say which source is
+    // behind, and two sources at one checkpoint are two lines.
+    for o in &r.others {
+        println!("source    {}", o.label);
+        println!("{}", checkpoint_line(&o.checkpoint));
+    }
+}
+
+/// The record's report in text, from its source's checkpoint on.
+fn print_record(r: &Report) {
     println!("source    {}", r.pinned);
+    println!("{}", checkpoint_line(&r.checkpoint));
     let logs: Vec<String> = r
         .logs
         .iter()
@@ -1132,7 +1264,7 @@ fn print_text(r: &Report) {
         return;
     };
     match &d.claim {
-        Ok(claim) => crate::print_rederived(Some(claim)),
+        Ok(claim) => crate::print_rederived(Some(claim), d.through.as_deref()),
         Err(why) => println!("rederived the claim does NOT hold: {why}"),
     }
     match &d.report {
@@ -1172,6 +1304,8 @@ fn json_of(r: &Report, code: i32) -> Value {
         .collect();
     let mut doc = json!({
         "source": r.pinned,
+        "checkpoint": checkpoint_json(&r.checkpoint),
+        "otherSources": r.others.iter().map(AlsoAsked::json).collect::<Vec<_>>(),
         "logs": logs,
         "newestLeaf": r.newest.map(crate::rfc3339_from_unix),
         "notes": r.notes,
@@ -1246,7 +1380,7 @@ fn json_of(r: &Report, code: i32) -> Value {
         return doc;
     };
     doc["rederived"] = match &d.claim {
-        Ok(claim) => crate::rederived_json(claim),
+        Ok(claim) => crate::rederived_json(claim, d.through.as_deref()),
         Err(why) => json!({ "holds": false, "refuted": why }),
     };
     doc["report"] = match &d.report {
@@ -1266,8 +1400,10 @@ fn json_of(r: &Report, code: i32) -> Value {
 /// held to, both signed notes, which §8 has the client print. What stopped it is named for what it
 /// was — the tool, a log, a source, or `--lookup` finding no current record to check, with what the
 /// sources say of the artifact instead, which is no failure — and is `failed-verification` only
-/// where a record, or a file it names, failed. `docs/using-trigon.md` lists every name.
-fn stopped(code: i32, error: &anyhow::Error, cause: Option<Cause>) -> Value {
+/// where a record, or a file it names, failed. `docs/using-trigon.md` lists every name. `sources`
+/// is every source `--lookup` asked that answers from a checkpoint, each with it, and is empty
+/// where none was asked.
+fn stopped(code: i32, error: &anyhow::Error, cause: Option<Cause>, asked: &[AlsoAsked]) -> Value {
     let log = error.downcast_ref::<LogError>();
     let stopped = match (code, log, cause) {
         (CANNOT, ..) => "cannot-check",
@@ -1302,6 +1438,7 @@ fn stopped(code: i32, error: &anyhow::Error, cause: Option<Cause>) -> Value {
         "stopped": stopped,
         "error": format!("{error:#}"),
         "signedNotes": notes,
+        "sources": asked.iter().map(AlsoAsked::json).collect::<Vec<_>>(),
     })
 }
 

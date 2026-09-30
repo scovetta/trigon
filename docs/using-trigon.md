@@ -65,6 +65,14 @@ $ echo $?
 
 `grep` matched nothing: the binary reproduces our verdict and cannot phone home.
 
+The verifier build also leaves out the WebAssembly runtime, which roughly doubles the dependency
+tree. Without it, the verifier cannot re-derive a verdict made under a stabilizer set it does not
+carry. When it meets one, it says so and names the builds that can:
+
+```
+cargo build --release -p trigon --no-default-features --features wasm
+```
+
 ---
 
 ## Task: compare two artifacts you already have
@@ -166,6 +174,30 @@ trigon base-image --from <a digest-pinned base>
 out, and it hashes every response body that passes through it against the artifact under test. A
 build that downloads its own published artifact makes the run `void`, which is neither a pass nor a
 failure: the build may be honest, and we cannot tell.
+
+### Many packages at once: `trigon sweep`
+
+`trigon sweep` rebuilds every package URL in a file, one per line, and reports the rate:
+
+```
+$ trigon sweep corpora/m1-npm-smoke.txt --image <a digest-pinned base> --work ./sweep
+```
+
+It writes each target's row to `<work>/results.tsv` as the target finishes. A sweep that dies keeps
+every row it finished, and the same command resumes it. `--concurrency` builds several targets at
+once; each one holds a build container and a mirror container, so memory is the limit.
+
+A sweep stops early when `--wall` targets in a row fail the same way with none succeeding between
+them (10 by default, `0` for never), when less than 3 GB of memory is available, or when less than
+20 GB of disk is free. It says why on stderr and still prints its summary.
+
+**Exit codes**, so a scheduler can tell a finished sweep from one to resume:
+
+| code | meaning |
+| --- | --- |
+| `0` | nothing stopped the sweep, whatever its rows say |
+| `1` | the sweep could not run: no targets, or a file it could not read or write |
+| `3` | the sweep stopped early, at a wall or at the memory or disk floor. Every row so far is written; fix the cause and run the same command to resume |
 
 ---
 
@@ -309,6 +341,34 @@ what the statement says the comparison found (which members differ and how, and 
 on which side), and a statement that got the outcome right but misreported either of those does not
 hold.
 
+**A claim made under a set your binary does not carry.** A later Trigon may have changed the set a
+verdict names. The verdict then names the stabilizer-set module that implements its set, by
+sha256. For a published record, `verify-attestation` reads that module from the record's evidence,
+checks its sha256 against the one the verdict signs, and runs it. For a bundle, give the module with
+`--stabilizers <module.wasm>`. `--stabilizers` also runs a module when your binary does carry the
+set, which checks the module against the claim while you still can. A module whose sha256 is not
+the one the verdict signs is refused before it runs. For a record the command then exits 5, because
+it could not check the claim. For a bundle it exits 1, as it does for any failure. A statement that
+signs no module, such as a `trigon verify --attest` bundle, binds none. A module you give for it
+still runs, checked only against the set digest it reports and the stabilized digests the
+statement signs, and the output says so.
+
+A module gives stabilized bytes and nothing about which passes fired. So it can show that the
+stabilized forms are equal, and it cannot show the claim's tier. A `normalized` claim re-derived
+through a module gets a third answer, neither holding nor refuted:
+
+```
+module    through the module given, sha256:2bfd0ece…, which the verdict signs as its stabilizer-set
+          module; it says it was built from commit 9c41e0aa37b1f6d25e0c4a8b2d7f13e6c95a0b48
+rederived normalized_with_caveats under tar-gzip@cadb3a863443, and the statement claims
+          normalized — consistent: the stabilized forms are equal, as the claim says; an archived
+          set cannot show which tier of pass fired, so the claim's strength is not re-derived
+```
+
+It exits 0, as a claim that holds does: exit 0 means a verdict at or above
+`normalized_with_caveats`, and the module shows exactly that. `--output json` reports `"holds":
+false` and `"consistent": true`.
+
 ### A published record, from an evidence repository
 
 You check a record published to an evidence repository ([`19`](19-distribution-and-lookup.md))
@@ -328,11 +388,14 @@ the record with what the record signs about its run: the stabilizer set, when it
 that built it and the one that signed it, the egress tier, the derivation method, and, for a
 verdict, the command that would falsify it and where to dispute it, each marked absent where the
 record signs none. It reports an evidence file the directory does not hold as unchecked, never as
-passed. The exit code is [`19`](19-distribution-and-lookup.md) §6's: 0; 1 for a divergence; 2
-withdrawn; 3 void; 4 for anything that failed verification, or for a log that continues in a
-repository the directory does not hold; 5 when it could not check at all, bad arguments included.
-Add `--rerun-comparison --upstream <file> --rebuild <file>` to re-derive the verdict, and the
-command holds the published comparison report to the re-derivation too, member by member.
+passed, and prints the checkpoint of the log it read under the source, as every report that answers
+from a source does (see *Compare your view of a log with another user's*, in *Task: look up an
+artifact, or check a lockfile*). The exit code is [`19`](19-distribution-and-lookup.md) §6's: 0; 1
+for a divergence; 2 withdrawn; 3 void; 4 for anything that failed verification, or for a log that
+continues in a repository the directory does not hold; 5 when it could not check at all, bad
+arguments included. Add `--rerun-comparison --upstream <file> --rebuild <file>` to re-derive the
+verdict, and the command holds the published comparison report to the re-derivation too, member by
+member.
 
 Without a checkpoint, the output says so. The command then checks that the log is whole, but not
 that it extends anything you have seen before, so it would not notice a rewrite of the whole
@@ -377,6 +440,23 @@ The statement `attest` signs depends on the run, and it says which:
   signing void/v1 and nothing else: a void run gets no verdict, and no statement that says which way
   its comparison went
   ```
+
+**The stabilizer-set module.** A verdict that `publish` will accept names the stabilizer set as a
+WebAssembly module, which re-derives the verdict after binaries stop carrying that set (see *Task:
+publish to an evidence repository*). Give it with `--stabilizer-module <file>`, or set `[publish]
+stabilizer_module`; the flag wins. `attest` runs the module before it signs anything. It refuses to
+sign unless the module reports the run's set digest and stabilizes both stored artifacts to exactly
+the digests the run recorded:
+
+```
+module    sha256:2bfd0ecedc0b09d9b57cce7087baba1e259dc1e00c54f26b5c2c03fdfa1404b8, from
+          /home/you/.config/trigon/stabilizers.wasm: implements `tar-gzip@cadb3a863443…` and
+          stabilizes both artifacts as the run did, so the verdict names it
+```
+
+It then keeps the module in the store and signs its sha256 into the verdict as
+`evidence.stabilizerSetModule`. A void names no module. Without one, `attest` signs as before and
+says that `publish` will refuse the verdict.
 
 **Correcting a published record.** A published record is never edited. You supersede it instead,
 with a reason from a closed list: `withdrawn`, `set_changed`, `attempts_disagree_later`,
@@ -458,6 +538,74 @@ by the digest, and refuses if that fails, whatever is set. The confirmation of a
 that `--image derive` built reuses that image, which is a cache. The gate refuses it on one machine
 however the two settings stand, and `--confirm` says so instead of naming a setting.
 
+## Task: confirm on a second machine
+
+`rebuild --confirm`, `attest` and `publish` each read one store, on one machine. To confirm a run
+on a second machine without sharing a store, move runs between the two stores with `trigon runs
+export` and `trigon runs import`.
+
+Machine A rebuilds the package and exports the run:
+
+```
+# machine A
+trigon rebuild pkg:npm/left-pad@1.3.0 --image <pinned> --egress mirror-only --store ./trigon-store
+trigon runs --store ./trigon-store          # the run's id is first on its line
+trigon runs export <run> --store ./trigon-store --out run.tar
+```
+
+Copy `run.tar` to machine B. B imports it, confirms it, and exports the confirming run:
+
+```
+# machine B
+trigon runs import run.tar --store ./trigon-store
+trigon rebuild --confirm <run> --store ./trigon-store
+trigon runs --store ./trigon-store          # the confirming run is the newest, first
+trigon runs export <confirming run> --store ./trigon-store --out confirmation.tar
+```
+
+Copy `confirmation.tar` back to A. A imports it, signs the first run and publishes it:
+
+```
+# machine A
+trigon runs import confirmation.tar --store ./trigon-store
+trigon attest <run> --store ./trigon-store --key ~/.trigon/signing.key
+trigon publish <run> --store ./trigon-store
+```
+
+The gate on A now holds two attempts at the same work, on two machine ids. B's confirmation must
+still begin at least `confirmation_interval` after A's run began, and must agree with it, as on one
+machine. The gate publishes one run of the pair, so A publishes its own and B's stays in the store
+beside it.
+
+An export is one uncompressed tar. It holds each run's record and every file the record names: the
+artifacts the store kept, the comparison, the strategy, the build log, the network transcript, the
+guard manifest, the signed statements and the evidence they sign. The same runs give the same file.
+`runs export` refuses a run that names a file its store has lost, and writes nothing. It leaves out
+the re-derived comparison `trigon serve` shows, and `trigon rederive <run>` makes it again on the
+importing machine. Compress the file to carry it if you like, and decompress it before you import
+it: `runs import` refuses a compressed file.
+
+`runs import` checks the whole file before it writes anything. Every blob must hash to its name,
+every record must parse, and every file a record names must be in the file. Every entry must be a
+regular file at a path an export writes: no links, no `..`, and nothing that no run in the file
+names. The file may be no larger than an artifact may expand to (4 GiB). Then `import` writes the
+blobs first and each record last, so a failed import leaves no record naming a missing blob. A run
+already in the store with the same record is left alone. A run with the same id and a different
+record is refused, and so is the whole import. If another command writes a record under the same
+id while the import runs, `import` refuses that run and leaves the other record as it is.
+
+**What an import trusts.** `runs import` checks the file, not what the records say. Each record
+keeps what the exporting machine wrote: its machine id, when the run began, which caches it could
+reuse, and how its base image was pinned. The import writes nothing about the importing machine.
+The gate's same-host rule compares the machine ids the records carry, so a record that names
+another machine counts as another machine. The records also decide what a confirmation runs.
+`rebuild --confirm` builds an imported run with the strategy the file carries, which names the
+source to fetch and the commands to run, on the base image and at the egress tier the record names.
+`--image` and `--egress` cannot be given with `--confirm`. So whoever made the file chooses what
+machine B pulls and runs, as well as what the gate reads. Importing a run trusts whoever made the
+file as much as sharing a store with them would. Import files only from machines you would let
+write to your store (the [threat model](threat-model.md), D40).
+
 ## Task: publish to an evidence repository
 
 `trigon publish` is the only thing that writes an evidence repository
@@ -525,9 +673,9 @@ writes any of that, `publish`:
   `"feed"` publishes it with its entry in the divergence feed (below);
 - **refuses** a run already published; the second of two agreeing attempts whose first is published;
   a record for an artifact that already has a current one, unless it supersedes it (`trigon attest
-  <run> --supersedes <record> --reason <code>`); and a verdict without the falsifying command naming
+  <run> --supersedes <record> --reason <code>`); a verdict without the falsifying command naming
   `[publish] origin` and the dispute pointer `[publish] disputes` names (attest it again with both
-  set). It lists every refusal at once:
+  set); and a verdict that names no stabilizer-set module (below). It lists every refusal at once:
 
   ```
   Error: refusing to publish, and nothing was written:
@@ -597,6 +745,64 @@ checkpoint, unsigned:
   2DY/vIdbRFHytloyGdm9M4zsk21mswwqlxN2n8Vo/8A=
 commit    publish: 1 record, tree 0 → 1
 ```
+
+### The stabilizer-set module
+
+A binary carries one version of each stabilizer set. Once a later Trigon changes a set, it can no
+longer re-derive a verdict made under the old one. So every published verdict names its set as a
+WebAssembly module, and `publish` puts the module in `evidence/` beside the record
+([`09-attestations.md`](09-attestations.md) §7.1). A verifier whose binary does not carry the set
+runs the module instead.
+
+Build the module once for each checkout you attest from, with the WebAssembly target installed:
+
+```
+$ rustup target add wasm32-unknown-unknown
+$ scripts/build-set-module.sh
+module  /home/you/src/trigon/target/wasm32-unknown-unknown/release/trigon_stabilize_wasm.wasm
+sha256  2bfd0ecedc0b09d9b57cce7087baba1e259dc1e00c54f26b5c2c03fdfa1404b8
+commit  9c41e0aa37b1f6d25e0c4a8b2d7f13e6c95a0b48
+```
+
+The last line is the commit the module was built from, which the module names in itself. It ends in
+`.dirty` if your tree had uncommitted changes. Nobody can rebuild such a module from a commit, so
+build the module you publish with from a clean checkout. `attest` prints the module's commit next to
+the one your Trigon was built from, and says so if the module is dirty or names no commit.
+
+Copy it somewhere that stays put, and name it in `evidence.toml`:
+
+```toml
+[publish]
+stabilizer_module = "~/.config/trigon/stabilizers.wasm"
+```
+
+or pass `trigon attest <run> --stabilizer-module <file>` for one run. `attest` checks the module
+against the run before it names it. `publish` refuses a verdict that names none, and says how to fix
+it:
+
+```
+Error: refusing to publish, and nothing was written:
+  - run `1789000000-aaaa0001`: its verdict names no stabilizer-set module, and a verdict is published
+    with the module that re-derives it once no binary carries its set (docs/09 §7.1). Build one with
+    `scripts/build-set-module.sh`, set `[publish] stabilizer_module` to the file it prints, or pass
+    it as `trigon attest 1789000000-aaaa0001 --stabilizer-module <file>`, and attest the run again
+```
+
+`publish` writes one copy of a module however many records name it. A void or a withdrawal needs
+no module.
+
+A module can use at most 4 GiB of memory, so it stabilizes a smaller artifact than your binary can.
+An artifact that expands to 496 MiB stabilized in our measurement, and one that expands to 512 MiB
+did not. For an artifact past that limit, `attest` refuses to name the module, and `publish` then
+refuses the verdict.
+
+The build is reproducible: the same commit gives the same bytes on any machine and at any path. The
+script leaves out debug information and rewrites the checkout's path and cargo's with
+`--remap-path-prefix`, so anyone can check out the commit a module names, rebuild it, and compare
+its sha256 with the one a verdict signs. `verify-attestation` prints that commit whenever it runs a
+module. A plain `cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release`
+gives a module that works the same but carries your paths and names no commit, so its sha256 is
+yours alone.
 
 ### Rebuilt artifacts as release assets
 
@@ -789,6 +995,7 @@ next      trigon evidence sync --source trigon
 $ trigon evidence sync
 source    `trigon`, from /home/you/.config/trigon/evidence.toml
 synced    `github.com/owner/trigon-evidence`: 1204 leaves, newest leaf 2026-09-27T09:12:44Z
+checkpoint github.com/owner/trigon-evidence 1204 028uVt7W9xY0dDf8IIvx9y5ste0leyrv9VEJoXjRLUM=
 url       https://github.com/owner/trigon-evidence.git (https): 1204 leaves, answering
 url       https://codeberg.org/owner/trigon-evidence.git (https): 1201 leaves, lagging
 note      https://codeberg.org/owner/trigon-evidence.git is lagging: it serves …
@@ -827,6 +1034,13 @@ that are not one log, and `sync` prints each with both signed notes. A refused s
 nothing, and every command asking it exits 4, until a sync of it works. A source that could not be
 reached still answers from its clone until the clone is stale.
 
+A location that serves a repository with no log at all counts as one that could not be reached. A
+mistyped URL, or a repository nothing has been published to yet, looks like that. `sync` sets the
+location aside with a note that names its URL, and the other locations answer. If every location of
+a source is like that, the sync fails as it does for a source that could not be reached. The source
+answers from its clone until the clone is stale, and answers unknown if it never synced. A location
+whose log is there and does not verify still refuses the source.
+
 **The first sync, and a lost state.** Without a checkpoint accepted or configured, the first sync
 accepts the first checkpoint that verifies under the log key, and says so; from then on every
 checkpoint must extend the one accepted. The state directory is therefore what Trigon catches a
@@ -848,12 +1062,13 @@ is configured with.
 
 **Trust on first use.** A source added with `--trust-on-first-use`, or through
 `TRIGON_EVIDENCE_REPO` with `TRIGON_EVIDENCE_TOFU=1`, reads a key it does not pin from `keys/` at
-the first location reached on its first sync, and records it in its state. Every later sync is held
-to that key, whatever `keys/` says afterwards. Whoever served that location at that moment chose the
-key, so every answer from the source says it rests on keys trusted on first use, and where and when
-they were read. `evidence list` says so, and so does `verify-attestation --record --source <name>`,
-which reads the recorded keys and, as a sync does, refuses a source that has synced before and lost
-its checkpoint.
+the first location reached that holds a log on its first sync, and records it in its state. A
+location that serves no log at all is passed over with a note. Every later sync is held to that key,
+whatever `keys/` says afterwards. Whoever served that location at that moment chose the key, so
+every answer from the source says it rests on keys trusted on first use, and where and when they
+were read. `evidence list` says so, and so does `verify-attestation --record --source <name>`, which
+reads the recorded keys and, as a sync does, refuses a source that has synced before and lost its
+checkpoint.
 
 **Freshness.** `[freshness]` sets two clocks. A source whose last successful sync is older than
 `stale_after` (a day) is stale: a command that needs it syncs it first and says so, or answers
@@ -864,17 +1079,18 @@ yet is frozen too. An unknown source fails a check only where it is required.
 
 **Listing and removing.** `evidence list` shows each source's origin, its locations and their
 transports, whether it is required, the file that added it, whether its keys are pinned or trusted
-on first use, when it last synced, the size of the checkpoint it answers from, when its newest leaf
-was logged, and how it stands now: fresh; usable from its clone after a failed sync, until it goes
-stale; unknown; frozen; or refused. It verifies each clone as a command asking it would, touching no
-network (`--output json` for a script). A source whose state files cannot be read says so on its own
-row and answers unknown, and `list` shows the others as they are. `evidence remove <name>` takes a
-source out of your file, with its clones and its state; it refuses a source the project's
-`.trigon/evidence.toml` or `TRIGON_EVIDENCE_REPO` added, and says why. `add` and `remove` write the
-file a symlinked `evidence.toml` leads to, and keep the link. A project's sources sync like any
-other, and everything Trigon says about one names the file that added it. Trigon fetches a project's
-source over HTTPS only, and the same goes for a successor its log names in another repository; it
-refuses one at any other location.
+on first use, when it last synced, the checkpoint it answers from, when its newest leaf was logged,
+and how it stands now: fresh; usable from its clone after a failed sync, until it goes stale;
+unknown; frozen; or refused. It verifies each clone as a command asking it would, touching no
+network (`--output json` for a script). A source whose clones cannot be opened, or do not verify,
+answers from no checkpoint, and `list` shows only the size its last sync recorded. A source whose
+state files cannot be read says so on its own row and answers unknown, and `list` shows the others
+as they are. `evidence remove <name>` takes a source out of your file, with its clones and its
+state; it refuses a source the project's `.trigon/evidence.toml` or `TRIGON_EVIDENCE_REPO` added,
+and says why. `add` and `remove` write the file a symlinked `evidence.toml` leads to, and keep the
+link. A project's sources sync like any other, and everything Trigon says about one names the file
+that added it. Trigon fetches a project's source over HTTPS only, and the same goes for a successor
+its log names in another repository; it refuses one at any other location.
 
 ---
 
@@ -892,6 +1108,7 @@ $ trigon lookup sha512-r2cOJ3V46+rn1LIvf1Lpu…
 key       sha512:af670e277578ebeae7d4b22f7f52e9b9555e40ec62f8e8792ad65e7c82daf3131375a4f2…
 
 source    `trigon`, from /home/you/.config/trigon/evidence.toml; as of 2 leaves of `github.com/owner/trigon-evidence`
+checkpoint github.com/owner/trigon-evidence 2 A/5Y6ukCQKwSqtNLybUxPJ8cLlHpID1m8nJNVJkqGg0=
 note      synced first: it had never been synced
 answer    normalized — from 1 record(s) its log holds for it
 record    sha256:83ef8bb2…eb9737 at leaf 1 of `github.com/owner/trigon-evidence`, current
@@ -906,9 +1123,10 @@ egress    mirror-only, attestable
 derived   heuristic
 falsify   trigon verify-attestation --lookup sha256:ae1ea36b…21ee1d --predicate https://trigon.dev/equivalence/v2 --origin github.com/owner/trigon-evidence --rerun-comparison --upstream <file>
 dispute   https://github.com/owner/trigon-evidence/issues
-evidence  not checked here: comparison, guardManifest, rebuiltArtifact, stabilizerSetManifest, strategy. A clone keeps `evidence/` out, and `verify-attestation --lookup` fetches what it re-derives the claim from
+evidence  not checked here: comparison, guardManifest, rebuiltArtifact, stabilizerSetManifest, stabilizerSetModule, strategy. A clone keeps `evidence/` out, and `verify-attestation --lookup` fetches what it re-derives the claim from
 
 source    `theirs`, from /home/you/.config/trigon/evidence.toml; as of 1 leaves of `example.org/their-evidence`
+checkpoint example.org/their-evidence 1 m8T4Q7lCiTuA+V2tik/jpLNJa0gNd6x5ix+ijQ4POUY=
 note      synced first: it had never been synced
 answer    never checked — its log holds no record for it
 
@@ -939,6 +1157,30 @@ disagree  the sources disagree about it:
 exit      1: a divergence
 ```
 
+**Compare your view of a log with another user's.** Every report that answers from a source prints,
+under the source, the checkpoint it answered from on a line of its own: `lookup`, `check`,
+`verify-attestation`, `evidence sync` and `evidence list` all print it. The line holds the log's
+origin, its size and its root hash, spelled as the three lines of the log's `log/checkpoint` spell
+them:
+
+```
+checkpoint github.com/owner/trigon-evidence 2 A/5Y6ukCQKwSqtNLybUxPJ8cLlHpID1m8nJNVJkqGg0=
+```
+
+To check that you and another user see the same log, paste this line to each other, in an issue or
+a chat. At the same size, the two roots must be the same. Two roots at one size mean that one of you
+was shown a different log, a split view: report it with both lines. Lines at different sizes prove
+nothing either way, so the one behind runs `trigon evidence sync`, and you compare again. The line
+says nothing about a newer checkpoint that neither of you has seen. With `--remote`, the line is the
+checkpoint `--remote` fetched and verified, which can be newer than the one your last sync accepted.
+`--output json` and `check --format json|sarif` carry the same three values as `checkpoint`, with
+`origin`, `size` and `root`, for each source. `verify-attestation` carries its source's as
+`checkpoint`, and under `--lookup` lists each other source it asked in `otherSources`, with its
+name, its label, what it says and its `checkpoint`. Its text prints each of those sources after the
+report, as a `source` line with the checkpoint line under it, even where two sources are at one
+checkpoint. If `--lookup` finds no current record and says what the sources say instead, it prints
+each source it asked with its checkpoint line, and its JSON lists them in `sources`.
+
 **`trigon check <lockfile>`** reads `package-lock.json` and `npm-shrinkwrap.json`,
 `requirements.txt` and SPDX JSON. It looks each package up first by the digest the file declares
 (npm's `integrity`, every `--hash` of a requirement, an SBOM's `checksums`), and by its purl only
@@ -960,7 +1202,9 @@ checked instead of leaving it out.
 $ trigon check package-lock.json
 /home/you/app/package-lock.json · 3 package(s) · 2 source(s) · threshold at least normalized_with_caveats
 source    `trigon`, from /home/you/.config/trigon/evidence.toml; as of 2 leaves of `github.com/owner/trigon-evidence`
+checkpoint github.com/owner/trigon-evidence 2 A/5Y6ukCQKwSqtNLybUxPJ8cLlHpID1m8nJNVJkqGg0=
 source    `theirs`, from /home/you/.config/trigon/evidence.toml; as of 1 leaves of `example.org/their-evidence`
+checkpoint example.org/their-evidence 1 m8T4Q7lCiTuA+V2tik/jpLNJa0gNd6x5ix+ijQ4POUY=
 
   ✔ normalized                   1   ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░
   ✖ divergent                    1   ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░
@@ -1076,12 +1320,14 @@ following the source's chain into every repository its log has gone on in; it is
 build too, and fetches nothing.
 
 **The `stopped` field.** If either form of `verify-attestation` stops before it has a record to
-report on, `--output json` prints `{exit, stopped, error, signedNotes}`: the exit code; the cause,
-from the table below; the reason, as the text gives it; and, for an equivocation or a rollback, both
-signed notes, `null` otherwise. `stopped` names the cause, so `failed-verification` appears for a
-record and for nothing else. The one stop with no document is an argument that `clap` itself refuses
-(a flag it does not know, a flag without its value, a value it does not take), which comes before
-`--output` is read: exit `5`, `clap`'s message on stderr, and nothing on stdout.
+report on, `--output json` prints `{exit, stopped, error, signedNotes, sources}`: the exit code; the
+cause, from the table below; the reason, as the text gives it; for an equivocation or a rollback,
+both signed notes, `null` otherwise; and each source `--lookup` asked that answers from a
+checkpoint, with its name, its label, what it says and its `checkpoint`, empty otherwise. `stopped`
+names the cause, so `failed-verification` appears for a record and for nothing else. The one stop
+with no document is an argument that `clap` itself refuses (a flag it does not know, a flag without
+its value, a value it does not take), which comes before `--output` is read: exit `5`, `clap`'s
+message on stderr, and nothing on stdout.
 
 | `stopped` | exit | the cause |
 | --- | --- | --- |
@@ -1124,6 +1370,7 @@ branch = "main"                                       #   user@host:path, or a p
 origin = "github.com/<owner>/trigon-evidence"         # the log's origin
 disputes = "https://github.com/<owner>/trigon-evidence/issues"
 log_key = "~/.config/trigon/log.key"                  # read only by `trigon log sign`
+stabilizer_module = "~/.config/trigon/stabilizers.wasm"   # attest names it in every verdict
 divergences = "refuse"                                # or "feed": published, with the Atom feed
 rebuilt_artifacts = "none"                            # or "github-release": `publish` uploads them
 same_host_confirmation = false
@@ -1147,7 +1394,9 @@ trust_on_first_use = false     # true only to read an unpinned key from the repo
 
 `attest` signs `origin` and `disputes` into every verdict's falsifying command and dispute pointer
 when **both** are set, and leaves both out when either is not. Leaving them out is right for local
-use, and `publish` refuses such a verdict.
+use, and `publish` refuses such a verdict. `stabilizer_module` is the file `attest` names in every
+verdict as its stabilizer-set module; `publish` refuses a verdict that names none (see *Task:
+publish to an evidence repository*). Trigon expands it as it expands `log_key`. It has no default.
 
 **An unknown key is an error**, and so is a value of the wrong kind, a pin that does not parse, or a
 source without both keys that does not ask for trust on first use: if Trigon ignored a typo in a

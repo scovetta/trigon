@@ -46,9 +46,9 @@ use trigon_attest::evidence::{
 };
 use trigon_attest::location::{Location, Transport, printable};
 use trigon_attest::log::{
-    Bundle, KeyHistory, Leaf, LeafPos, LogEndLeaf, LogError, LogFiles, SignedCheckpoint,
-    SignedNote, Tile, check_continuation, prove_inclusion_from_tiles, successor_vkey,
-    verify_extension_from_tiles,
+    Bundle, Checkpoint, KeyHistory, Leaf, LeafPos, LogEndLeaf, LogError, LogFiles,
+    SignedCheckpoint, SignedNote, Tile, check_continuation, prove_inclusion_from_tiles,
+    successor_vkey, verify_extension_from_tiles,
 };
 use trigon_attest::state::{KeysFile, SyncRecord};
 
@@ -653,6 +653,15 @@ impl<'h> Remote<'h> {
             last.checkpoint.origin(),
             self.names.join(", then ")
         )
+    }
+
+    /// The checkpoint its answers are given from: the chain's last log's, as fetched and verified.
+    pub(crate) fn checkpoint(&self) -> &Checkpoint {
+        self.logs
+            .last()
+            .expect("a chain has a log")
+            .checkpoint
+            .checkpoint()
     }
 
     /// The origin of each log of the chain, by position.

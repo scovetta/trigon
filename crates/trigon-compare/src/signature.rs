@@ -217,8 +217,14 @@ fn entry(r: &Entry, o: &Entry, prefix: &str, out: &mut BTreeSet<String>) {
         (Body::Nested { inner: a, .. }, Body::Nested { inner: b, .. }) => {
             collect(a, b, &format!("{path}!"), out)
         }
+        // **The bytes each member contributes to its stabilized archive**, which is what this
+        // function compares and what the stabilized digest differs on. Only one side descends when
+        // the other's `.gz` would not parse (`NestedParseFailed` says why), and a nested archive
+        // has no bytes of its own until it is written, so asking for its body coded two readable
+        // members `body-unreadable` in a signed statement. That code is kept for a body that
+        // genuinely cannot be read.
         _ => {
-            let (Ok(a), Ok(b)) = (r.body_bytes(), o.body_bytes()) else {
+            let (Ok(a), Ok(b)) = (r.stabilized_bytes(), o.stabilized_bytes()) else {
                 out.insert(format!("body-unreadable@{path}"));
                 return;
             };

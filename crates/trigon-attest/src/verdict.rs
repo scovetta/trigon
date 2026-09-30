@@ -57,6 +57,11 @@ pub mod evidence_key {
     /// The stabilizer set's manifest file, as canonical JSON. Not the set digest, which is a hash
     /// over the manifest's rows and the digest of no file.
     pub const STABILIZER_SET_MANIFEST: &str = "stabilizerSetManifest";
+    /// The stabilizer set as a WebAssembly module (`trigon-stabilize-wasm`), which re-derives the
+    /// verdict after the binary stops carrying its set. `attest` names it only after the module
+    /// has reported the verdict's set digest and stabilized both artifacts to the digests the
+    /// verdict signs, and a verifier runs a module only when its sha256 is this one.
+    pub const STABILIZER_SET_MODULE: &str = "stabilizerSetModule";
     /// The comparison report the run stored: per-member differences, codes and field edits.
     pub const COMPARISON: &str = "comparison";
     /// The strategy that ran, as the canonical JSON the run stored (`RunRecord.strategy`).
@@ -197,6 +202,8 @@ pub enum DisputePointer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EvidenceDigests<'a> {
     pub stabilizer_set_manifest: Option<&'a str>,
+    /// The stabilizer-set module, where the verdict was signed with one. Never on a void.
+    pub stabilizer_set_module: Option<&'a str>,
     pub comparison: Option<&'a str>,
     pub strategy: Option<&'a str>,
     pub guard_manifest: Option<&'a str>,
@@ -210,6 +217,10 @@ impl EvidenceDigests<'_> {
             (
                 evidence_key::STABILIZER_SET_MANIFEST,
                 self.stabilizer_set_manifest,
+            ),
+            (
+                evidence_key::STABILIZER_SET_MODULE,
+                self.stabilizer_set_module,
             ),
             (evidence_key::COMPARISON, self.comparison),
             (evidence_key::STRATEGY, self.strategy),

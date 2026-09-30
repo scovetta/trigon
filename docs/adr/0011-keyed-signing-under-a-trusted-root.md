@@ -12,6 +12,9 @@ until a root exists: "Verifiers pin the root, not the key", the `verify-attestat
 "`LocalKey` … is not a deployment mode for anything published" — records are published under a
 single pinned ed25519 key (ADR-0014 Decision 8). The keyed-signing half stands. Each superseded or
 amended part below carries a short note; the text is kept as the record of what was decided.
+Amended on 2026-09-30: the Sigstore bridge ADR-0014 deferred, for npm or PyPI taking third-party
+attestations in Sigstore's shape, is dropped, because it buys nothing. With keyless not planned and
+Rekor gone, no part of Sigstore is planned.
 
 ## Decision
 

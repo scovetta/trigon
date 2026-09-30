@@ -39,6 +39,8 @@ use trigon_attest::log::{
 };
 use trigon_store::{ArtifactRef, CacheState, Environment, RunRecord, RunState, Store};
 
+mod set_module;
+
 const ORIGIN: &str = "example.com/trigon-evidence";
 const DISPUTES: &str = "https://example.com/trigon-evidence/issues";
 
@@ -175,15 +177,17 @@ impl World {
         self.dir.join("home/.config/trigon/evidence.toml")
     }
 
-    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel and the log key,
-    /// and `extra` after them.
+    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel, the log key and
+    /// the stabilizer-set module, and `extra` after them.
     fn config(&self, extra: &str) {
         std::fs::write(
             self.config_path(),
             format!(
-                "[publish]\norigin = \"{}\"\ndisputes = \"{DISPUTES}\"\nlog_key = \"{}\"\n{extra}",
+                "[publish]\norigin = \"{}\"\ndisputes = \"{DISPUTES}\"\nlog_key = \"{}\"\n\
+                 stabilizer_module = \"{}\"\n{extra}",
                 self.origin,
-                self.log_key.display()
+                self.log_key.display(),
+                set_module::built().display()
             ),
         )
         .unwrap();
@@ -1630,6 +1634,63 @@ fn the_falsifying_command_re_derives_a_published_verdict() {
         json_of(&c.output().unwrap(), 4)["stopped"],
         "failed-verification"
     );
+}
+
+/// The falsifying command of a verdict made under a set no binary carries: the record's
+/// stabilizer-set module is fetched from the clone's remote with the rest of its evidence, held to
+/// the digest the verdict signs, and run, and the claim is consistent, exit 0.
+#[test]
+fn the_falsifying_command_re_derives_through_the_module_the_record_carries() {
+    let w = World::new("falsify-retired");
+    w.init();
+    git(&w.remote, &["config", "uploadpack.allowFilter", "true"]);
+    git(
+        &w.remote,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    let a = Package::new("a", false);
+    let (first, _) = pair(&w, &a, "aaaa");
+    let module = set_module::fake(set_module::RETIRED, b"stable");
+    set_module::retire(&w.store, &first, &w.attestation(), &module, b"stable");
+    ok(&w.publish(&[&first]));
+    ok(&w.add("main", &[&format!("file://{}", w.remote.display())], &[]));
+
+    let upstream = w.dir.join(a.file());
+    std::fs::write(&upstream, &a.upstream).unwrap();
+    let rebuilt = w.dir.join("rebuilt.tgz");
+    std::fs::write(&rebuilt, &a.rebuilt).unwrap();
+    let subject = format!("sha256:{}", hex(&sha2::Sha256::digest(&a.upstream)));
+    let said = exits(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &subject,
+            "--origin",
+            &w.origin,
+            "--rerun-comparison",
+            "--upstream",
+            upstream.to_str().unwrap(),
+            "--rebuild",
+            rebuilt.to_str().unwrap(),
+        ]),
+        0,
+    );
+    let module = hex(&sha2::Sha256::digest(&module));
+    assert!(
+        said.contains(&format!(
+            "through the stabilizer-set module sha256:{module} the record carries"
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains("evidence file(s) the record names from file://"),
+        "{said}"
+    );
+    assert!(
+        said.contains("rederived normalized_with_caveats under tar-gzip@111111111111"),
+        "{said}"
+    );
+    assert!(said.contains("— consistent:"), "{said}");
 }
 
 /// The falsifying command is answered in the log its origin names and nowhere else. A source a
@@ -4033,8 +4094,9 @@ fn remote_takes_nothing_an_index_file_says_on_its_word() {
 
 /// A log read over `--remote` is frozen as a clone is (`docs/19` §6): one with no leaf, which
 /// says nothing of how recent it is, and one whose newest leaf is older than `frozen_after`,
-/// answer unknown, exit 4, whatever it holds. A source trusted on first use is read under the keys
-/// its first sync recorded, and its answers say so.
+/// answer unknown, exit 4, whatever it holds, under the checkpoint that was fetched and verified
+/// to say so, which each prints as every source does. A source trusted on first use is read under
+/// the keys its first sync recorded, and its answers say so.
 #[test]
 fn remote_answers_unknown_for_a_frozen_log() {
     let w = World::new("remote-frozen");
@@ -4043,21 +4105,30 @@ fn remote_answers_unknown_for_a_frozen_log() {
     let url = github_url_to(&w, &w.remote);
     ok(&w.trigon(&["evidence", "add", "gh", url, "--trust-on-first-use"]));
     ok(&w.sync(&[]));
-    let remote = || {
-        server
-            .state()
-            .serve("owner/trigon-evidence", &w.checkout("served"));
-        let mut c = w.command(&["lookup", &format!("sha256:{}", "ab".repeat(32)), "--remote"]);
+    let subject = format!("sha256:{}", "ab".repeat(32));
+    // What the command said, and what it prints of the checkpoint the log is served with.
+    let remote = |extra: &[&str]| {
+        let served = w.checkout("served");
+        server.state().serve("owner/trigon-evidence", &served);
+        let mut args = vec!["lookup", subject.as_str(), "--remote"];
+        args.extend_from_slice(extra);
+        let mut c = w.command(&args);
         c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
-        c.output().unwrap()
+        let checkpoint = printed(&std::fs::read(served.join("log/checkpoint")).unwrap());
+        (c.output().unwrap(), checkpoint)
     };
-    let said = exits(&remote(), 4);
+    let (out, (line, json)) = remote(&[]);
+    let said = exits(&out, 4);
     assert!(said.contains("answer    unknown"), "{said}");
     assert!(said.contains("frozen: its log has no leaf"), "{said}");
     assert!(
         said.contains("resting on keys trusted on first use, read from"),
         "{said}"
     );
+    under_source(&said, "gh", &line);
+    let (out, _) = remote(&["--output", "json"]);
+    let doc = json_of(&out, 4);
+    assert_eq!(doc["sources"][0]["checkpoint"], json, "{doc}");
 
     w.append_signed(
         &w.remote,
@@ -4066,15 +4137,18 @@ fn remote_answers_unknown_for_a_frozen_log() {
         })],
         &[],
     );
-    let said = exits(&remote(), 4);
+    let (out, (grown, _)) = remote(&[]);
+    let said = exits(&out, 4);
     assert!(said.contains("answer    unknown"), "{said}");
     assert!(
         said.contains("frozen: its newest leaf was logged"),
         "{said}"
     );
+    assert_ne!(grown, line);
+    under_source(&said, "gh", &grown);
     // Measured against `frozen_after`: sixty days, and it answers, never checked.
     w.append_config("[freshness]\nfrozen_after = \"60d\"\n");
-    let said = exits(&remote(), 2);
+    let said = exits(&remote(&[]).0, 2);
     assert!(said.contains("never checked"), "{said}");
 }
 
@@ -4719,5 +4793,250 @@ fn check_lists_what_did_not_pass_most_severe_first() {
     assert!(
         said.contains(&format!("{} — normalized", a.target())),
         "{said}"
+    );
+}
+
+/// What every report prints of the checkpoint `note` holds, read from the note itself: its line,
+/// `checkpoint <origin> <size> <root>` with the root as the note spells it, and its JSON.
+fn printed(note: &[u8]) -> (String, serde_json::Value) {
+    let text = String::from_utf8(note.to_vec()).unwrap();
+    let mut lines = text.lines();
+    let (origin, size, root) = (
+        lines.next().unwrap(),
+        lines.next().unwrap(),
+        lines.next().unwrap(),
+    );
+    (
+        format!("checkpoint {origin} {size} {root}"),
+        serde_json::json!({
+            "origin": origin,
+            "size": size.parse::<u64>().unwrap(),
+            "root": root,
+        }),
+    )
+}
+
+/// Assert that the first line after the report's `source    `name`` line, and its label's
+/// continuation, is `line`.
+fn under_source(said: &str, name: &str, line: &str) {
+    let lines: Vec<&str> = said.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with(&format!("source    `{name}`")))
+        .unwrap_or_else(|| panic!("no source `{name}`: {said}"));
+    let next = lines[at + 1..]
+        .iter()
+        .find(|l| !l.starts_with("          "))
+        .unwrap_or_else(|| panic!("nothing after source `{name}`: {said}"));
+    assert_eq!(*next, line, "{said}");
+}
+
+/// Every report that answers from a source prints, under the source, the checkpoint it answered
+/// from as one line, `checkpoint <origin> <size> <root>`, and carries it in JSON as `checkpoint`:
+/// the one each source's last sync accepted, as its state holds it, with the root as the note
+/// spells it — for `lookup`, `check` in text, JSON and SARIF, and both forms of
+/// `verify-attestation`, whose `--lookup` prints every other source it asks too, each under its
+/// own name, a mirror at the same checkpoint included.
+#[test]
+fn every_report_prints_the_checkpoint_it_answered_from() {
+    let w = World::with("checkpoint-a", "example.com/a", 3);
+    let b = World::with("checkpoint-b", "example.com/b", 4);
+    w.init();
+    b.init();
+    let (x, y) = (Package::new("x", false), Package::new("y", false));
+    let rx = w.record_of(&w.publish_package(&x, "aaaa"));
+    b.publish_package(&y, "bbbb");
+    ok(&w.add("a", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.add_pinned(&b, "b", &[b.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let (line_a, json_a) = printed(&std::fs::read(w.state("a").join("checkpoint")).unwrap());
+    let (line_b, json_b) = printed(&std::fs::read(w.state("b").join("checkpoint")).unwrap());
+    assert!(
+        line_a.starts_with("checkpoint example.com/a 1 "),
+        "{line_a}"
+    );
+    assert!(
+        line_b.starts_with("checkpoint example.com/b 1 "),
+        "{line_b}"
+    );
+
+    let said = exits(&w.trigon(&["lookup", &x.integrity()]), 0);
+    under_source(&said, "a", &line_a);
+    under_source(&said, "b", &line_b);
+    let doc = json_of(
+        &w.trigon(&["lookup", &x.integrity(), "--output", "json"]),
+        0,
+    );
+    assert_eq!(doc["sources"][0]["checkpoint"], json_a, "{doc}");
+    assert_eq!(doc["sources"][1]["checkpoint"], json_b, "{doc}");
+
+    let lock = lockfile(&w, &[("demo-x", &x.integrity())]);
+    let lock = lock.to_str().unwrap();
+    let said = exits(&w.trigon(&["check", lock]), 0);
+    under_source(&said, "a", &line_a);
+    under_source(&said, "b", &line_b);
+    let doc = json_of(&w.trigon(&["check", lock, "--format", "json"]), 0);
+    let sarif = json_of(&w.trigon(&["check", lock, "--format", "sarif"]), 0);
+    for (i, want) in [&json_a, &json_b].into_iter().enumerate() {
+        assert_eq!(doc["sources"][i]["checkpoint"], *want, "{doc}");
+        assert_eq!(
+            row(&doc, &x.target())["sources"][i]["checkpoint"],
+            *want,
+            "{doc}"
+        );
+        assert_eq!(
+            sarif["runs"][0]["properties"]["trigon"]["sources"][i]["checkpoint"], *want,
+            "{sarif}"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["sources"][i]["checkpoint"], *want,
+            "{sarif}"
+        );
+    }
+
+    // The falsifying command, in its origin's log: that source's checkpoint alone.
+    let subject = format!("sha256:{}", x.sha256());
+    let said = exits(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &subject,
+            "--origin",
+            "example.com/a",
+        ]),
+        0,
+    );
+    under_source(&said, "a", &line_a);
+    assert!(!said.contains(&line_b), "{said}");
+    // Every source asked: the record's source's first, and each other's after the report, under
+    // its own name.
+    let said = exits(&w.trigon(&["verify-attestation", "--lookup", &subject]), 0);
+    under_source(&said, "a", &line_a);
+    under_source(&said, "b", &line_b);
+    assert!(
+        said.find("source    `a`") < said.find("source    `b`"),
+        "{said}"
+    );
+    let doc = json_of(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &subject,
+            "--output",
+            "json",
+        ]),
+        0,
+    );
+    assert_eq!(doc["checkpoint"], json_a, "{doc}");
+    assert_eq!(doc["otherSources"][0]["name"], "b", "{doc}");
+    assert_eq!(doc["otherSources"][0]["said"], "never checked", "{doc}");
+    assert_eq!(doc["otherSources"][0]["checkpoint"], json_b, "{doc}");
+    // No current record to check: what every source asked says instead, each under the checkpoint
+    // it says it from, and in JSON beside the stop.
+    let nothing = format!("sha256:{}", "0".repeat(64));
+    let out = w.trigon(&["verify-attestation", "--lookup", &nothing]);
+    let said = exits(&out, 2);
+    assert!(said.contains("`a` says never checked"), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    under_source(&stdout, "a", &line_a);
+    under_source(&stdout, "b", &line_b);
+    let doc = json_of(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &nothing,
+            "--output",
+            "json",
+        ]),
+        2,
+    );
+    assert_eq!(doc["stopped"], "no-current-record", "{doc}");
+    for (i, (name, want)) in [("a", &json_a), ("b", &json_b)].into_iter().enumerate() {
+        assert_eq!(doc["sources"][i]["name"], name, "{doc}");
+        assert_eq!(doc["sources"][i]["said"], "never checked", "{doc}");
+        assert_eq!(doc["sources"][i]["checkpoint"], *want, "{doc}");
+    }
+    // A stop before any source answered names none.
+    let doc = json_of(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &nothing,
+            "--origin",
+            "example.com/none",
+            "--output",
+            "json",
+        ]),
+        4,
+    );
+    assert_eq!(doc["stopped"], "no-source", "{doc}");
+    assert_eq!(doc["sources"], serde_json::json!([]), "{doc}");
+
+    // The record form, from the source's clones and from a directory.
+    let files = w.checkout("files");
+    let file = files.join(record_path(&rx));
+    let file = file.to_str().unwrap();
+    for evidence in [&[][..], &["--evidence", files.to_str().unwrap()][..]] {
+        let mut args = vec!["verify-attestation", "--record", file, "--source", "a"];
+        args.extend_from_slice(evidence);
+        let said = exits(&w.trigon(&args), 0);
+        under_source(&said, "a", &line_a);
+        args.extend(["--output", "json"]);
+        let doc = json_of(&w.trigon(&args), 0);
+        assert_eq!(doc["checkpoint"], json_a, "{doc}");
+        assert_eq!(doc["otherSources"], serde_json::json!([]), "{doc}");
+    }
+
+    // A mirror of `a` named as a source of its own is at `a`'s checkpoint, and `--lookup` prints
+    // it under its own name all the same: one line per source asked, never one per checkpoint.
+    ok(&w.add("mirror", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let said = exits(&w.trigon(&["verify-attestation", "--lookup", &subject]), 0);
+    under_source(&said, "a", &line_a);
+    under_source(&said, "b", &line_b);
+    under_source(&said, "mirror", &line_a);
+    assert_eq!(said.matches(&line_a).count(), 2, "{said}");
+}
+
+/// `--remote` prints the checkpoint it fetched and verified, which is what it answered from:
+/// newer than the one the last sync accepted, where the log has grown since.
+#[test]
+fn remote_prints_the_checkpoint_it_fetched() {
+    let w = World::new("checkpoint-remote");
+    w.init();
+    let a = Package::new("a", false);
+    w.publish_package(&a, "aaaa");
+    let url = github_url_to(&w, &w.remote);
+    ok(&w.add("gh", &[url], &[]));
+    ok(&w.sync(&[]));
+    let (accepted, _) = printed(&std::fs::read(w.state("gh").join("checkpoint")).unwrap());
+    w.publish_package(&Package::new("b", false), "bbbb");
+    let server = Server::start();
+    let served = w.checkout("served");
+    server.state().serve("owner/trigon-evidence", &served);
+    let (line, json) = printed(&std::fs::read(served.join("log/checkpoint")).unwrap());
+    assert_ne!(line, accepted);
+    let remote = |args: &[&str]| {
+        let mut c = w.command(args);
+        c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
+        c.output().unwrap()
+    };
+    let said = exits(&remote(&["lookup", &a.integrity(), "--remote"]), 0);
+    under_source(&said, "gh", &line);
+    let doc = json_of(
+        &remote(&["lookup", &a.integrity(), "--remote", "--output", "json"]),
+        0,
+    );
+    assert_eq!(doc["sources"][0]["checkpoint"], json, "{doc}");
+    let lock = lockfile(&w, &[("demo-a", &a.integrity())]);
+    let lock = lock.to_str().unwrap();
+    let said = exits(&remote(&["check", lock, "--remote"]), 0);
+    under_source(&said, "gh", &line);
+    let doc = json_of(&remote(&["check", lock, "--remote", "--format", "json"]), 0);
+    assert_eq!(doc["sources"][0]["checkpoint"], json, "{doc}");
+    assert_eq!(
+        row(&doc, &a.target())["sources"][0]["checkpoint"],
+        json,
+        "{doc}"
     );
 }

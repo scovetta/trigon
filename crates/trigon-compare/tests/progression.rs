@@ -156,6 +156,66 @@ fn an_archive_level_difference_is_counted_without_being_a_member() {
 }
 
 #[test]
+fn a_nested_archive_whose_framing_differs_is_counted_as_its_member() {
+    // Two gems differing only in the OS byte of `data.tar.gz`'s gzip header. The code is
+    // `container:gzip.os@data.tar.gz`, archive-level inside a member, and the member that holds it
+    // has a difference: counted as one, and named as closed by the pass that clears the header.
+    let tar_of = |members: &[(&str, &[u8])]| {
+        let mut b = ::tar::Builder::new(Vec::new());
+        for (name, body) in members {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            b.append_data(&mut h, name, *body).unwrap();
+        }
+        b.into_inner().unwrap()
+    };
+    let gem = |os: u8| {
+        let mut data = Vec::new();
+        trigon_archive::gzip::write(
+            &trigon_archive::GzipHeader {
+                os,
+                ..Default::default()
+            },
+            &tar_of(&[("lib/x.rb", b"x")]),
+            flate2::Compression::none(),
+            &mut data,
+        )
+        .unwrap();
+        tar_of(&[("data.tar.gz", &data)])
+    };
+    let c = compare_bytes(
+        gem(3),
+        gem(0),
+        Format::Tar,
+        &profile("gem").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Normalized);
+    let p = progression_of(&c);
+    assert!(p.consistent, "{p:#?}");
+
+    let first = &p.steps[0];
+    assert_eq!(
+        (first.differences, first.members, first.bodies),
+        (1, 1, 0),
+        "{first:#?}"
+    );
+    let last = p.steps.last().unwrap();
+    assert_eq!((last.differences, last.members), (0, 0), "{last:#?}");
+    let closer: Vec<_> = p
+        .steps
+        .iter()
+        .filter(|s| s.closed.iter().any(|m| m == "data.tar.gz"))
+        .map(|s| s.pass.clone())
+        .collect();
+    assert_eq!(closer, vec![Some("gzip-meta-v2".to_string())], "{p:#?}");
+}
+
+#[test]
 fn bytes_that_will_not_parse_give_an_omitted_progression_that_says_why() {
     // A failure here never fails the comparison it rides along with.
     let p = progression::compute(

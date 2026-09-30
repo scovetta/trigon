@@ -342,16 +342,19 @@ fn is_noise(line: &str) -> bool {
 /// still on screen, and a marker that reported the run length beside three visible copies of the
 /// line would overstate what is missing — in a log whose whole job is to be honest about what it
 /// dropped.
+///
+/// Blank lines collapse like any other. They were exempt, so a log that ended in forty of them
+/// spent the whole tail window on nothing and kept the last real line only if it looked like an
+/// error. The one- and two-line gaps a traceback or a compiler puts between sections are shorter
+/// than a run that collapses, and pass through as they were.
 fn dedup(lines: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
         let line = &lines[i];
         let mut end = i + 1;
-        if !line.trim().is_empty() {
-            while end < lines.len() && lines[end] == *line {
-                end += 1;
-            }
+        while end < lines.len() && lines[end] == *line {
+            end += 1;
         }
         let run = end - i;
         let shown = run.min(RUN_LIMIT + 1);
@@ -483,6 +486,49 @@ mod tests {
         assert!(c.text.contains("error: it broke"));
         // The count is what was omitted, not how long the run was: 1000 copies, 3 still shown.
         assert!(c.text.contains("repeated 997 more times"), "{}", c.text);
+    }
+
+    #[test]
+    fn a_run_of_blank_lines_collapses_like_any_other() {
+        let log = "x\n".to_string() + &"\n".repeat(1000) + "fatal error: y";
+        let c = compress(&log, 8192);
+        let blank = c.text.lines().filter(|l| l.is_empty()).count();
+        assert!(blank <= 3, "{blank} blank lines survived:\n{}", c.text);
+        assert!(c.text.contains("repeated 997 more times"), "{}", c.text);
+        assert!(c.text.ends_with("fatal error: y"), "{}", c.text);
+
+        // And the consequence. Forty trailing blank lines were the whole tail window, so the last
+        // thing the build said survived only if it looked like an error.
+        let mut log: String = (0..2000)
+            .map(|i| format!("compiling translation unit number {i} of the project\n"))
+            .collect();
+        log.push_str("the build stopped here\n");
+        log.push_str(&"\n".repeat(100));
+        let c = compress(&log, 2048);
+        assert!(c.text.contains("the build stopped here"), "{}", c.text);
+    }
+
+    #[test]
+    fn the_blank_lines_that_separate_a_traceback_are_left_as_they_are() {
+        // One blank line between chained exceptions, two before the summary: shorter than a run
+        // that collapses, so the shape a reader knows survives.
+        let log = [
+            "Traceback (most recent call last):",
+            "  File \"setup.py\", line 3, in <module>",
+            "    import numpy",
+            "ModuleNotFoundError: No module named 'numpy'",
+            "",
+            "During handling of the above exception, another exception occurred:",
+            "",
+            "Traceback (most recent call last):",
+            "  File \"setup.py\", line 5, in <module>",
+            "    raise SystemExit(1)",
+            "",
+            "",
+            "error: subprocess-exited-with-error",
+        ]
+        .join("\n");
+        assert_eq!(compress(&log, 4096).text, log);
     }
 
     #[test]

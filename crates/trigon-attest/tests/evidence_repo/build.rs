@@ -211,6 +211,9 @@ pub fn verdict_in(
         derivation: Some("heuristic"),
         evidence: EvidenceDigests {
             stabilizer_set_manifest: Some(&m),
+            // Signed before verdicts named a module: the fixture is written byte for byte by
+            // this, and a module here would be a new fixture.
+            stabilizer_set_module: None,
             comparison: Some(&r),
             strategy: Some(&s),
             guard_manifest: Some(&g),

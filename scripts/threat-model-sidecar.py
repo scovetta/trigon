@@ -12,7 +12,9 @@ it; if it does not match, the sidecar is stale and must be regenerated.
     python3 scripts/threat-model-sidecar.py [--check]
 
 `--check` regenerates in memory and exits non-zero if the file on disk differs,
-which is what CI wants.
+which is what CI wants. `--help` prints this and writes nothing, and any other
+argument is refused, exit 2, before anything is read or written: the script
+once took every argument it did not know as a request to regenerate.
 """
 import collections
 import hashlib
@@ -20,8 +22,6 @@ import json
 import pathlib
 import re
 import sys
-
-import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROSE = ROOT / "docs" / "threat-model.md"
@@ -48,7 +48,7 @@ KIND = {
     "P34": "integrity", "P35": "integrity", "P36": "integrity", "P37": "integrity",
     "P38": "confidentiality", "P39": "integrity", "P40": "integrity", "P41": "integrity",
     "P42": "correctness", "P43": "integrity", "P44": "integrity", "P45": "integrity",
-    "P46": "integrity",
+    "P46": "integrity", "P47": "integrity", "P48": "integrity", "P49": "integrity",
 }
 
 ADVERSARIES = [
@@ -376,6 +376,19 @@ def coverage(doc):
 
 
 def main():
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__.strip())
+        return 0
+    unknown = [a for a in args if a != "--check"]
+    if unknown:
+        print(f"unknown argument: {' '.join(unknown)}. Usage:\n"
+              "    python3 scripts/threat-model-sidecar.py [--check]", file=sys.stderr)
+        return 2
+
+    # Here rather than at the top, so the two answers above need no PyYAML.
+    import yaml
+
     src = PROSE.read_text()
     doc = build(src)
 
@@ -389,7 +402,7 @@ def main():
 
     text = HEADER + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True,
                                    width=100, default_flow_style=False)
-    if "--check" in sys.argv:
+    if "--check" in args:
         if not SIDECAR.exists() or SIDECAR.read_text() != text:
             print("docs/threat-model.yaml is stale; run scripts/threat-model-sidecar.py",
                   file=sys.stderr)

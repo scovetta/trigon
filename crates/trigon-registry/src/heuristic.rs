@@ -678,35 +678,7 @@ impl StrategyInferrer for PyPiInferrer {
             }
         }
 
-        // See `VENV`: the path is a constant because four places have to agree on it.
-        // `/trigon/deps`, not `/deps`. The root directory of a Debian image is mode 0555, and root
-        // writes there only through `CAP_DAC_OVERRIDE` — which the sandbox drops, deliberately and
-        // by name. So `python3 -m venv /deps` is `Permission denied` for root, and only at an
-        // enforced tier: `defer_deps` moves the deps phase out of the image build and into the
-        // container run, so the same recipe worked at `--egress open` with full capabilities and
-        // failed at `mirror-only` with none. A build that succeeds at one tier and fails at another
-        // for a reason that has nothing to do with the package, reported as the package's fault.
-        //
-        // `/trigon` is ours and already in the image — the phase scripts are copied there — so it
-        // exists at run time, is owned by root at 0755, and needs no capability to write to.
-        // `/tmp` would also work today and is the worse choice: it is world-writable, and a tmpfs
-        // mounted over it (which `docs/12-security.md` §5 wants) would empty it between the image
-        // build and the run without anything saying so.
-        let mut deps = BTreeMap::from([("venv".to_string(), VENV.to_string())]);
-        // A build must not consume the artifact it is reproducing. Ordinarily nothing tries — but
-        // a package that is part of the machinery that builds packages does, because the frontend
-        // needs it: rebuilding `packaging` or `pyproject-hooks` makes pip ask for the very version
-        // under test, the mirror refuses it, and the build dies. Excluding that one version lets
-        // the resolver take the release before it, which is the right thing for a build tool to
-        // build itself with.
-        deps.insert(
-            "exclude_self".into(),
-            format!(
-                "{}!={}",
-                target.reference.registry_name(),
-                target.reference.version
-            ),
-        );
+        let mut deps = pypi_deps(target);
         match (&target.intrinsics.publish_time, &self.mirror) {
             (Some(t), Some(_)) => {
                 deps.insert("registry_time".into(), t.clone());
@@ -747,39 +719,7 @@ impl StrategyInferrer for PyPiInferrer {
             },
             src: vec![uses("git-checkout", BTreeMap::new())],
             deps: vec![uses("pypi/deps/basic", deps)],
-            build: vec![uses(
-                "pypi/build/wheel",
-                BTreeMap::from([
-                    // **Build what will be compared, not what is usual.** `preferred()` picks the
-                    // sdist for a package whose only wheels are platform-specific — correctly,
-                    // because such a wheel is built on one machine and does not reproduce on
-                    // another — and a wheel built here would then be compared against it. The
-                    // comparator took its format from the upstream name and called the sdist a
-                    // malformed gzip.
-                    (
-                        "kind".to_string(),
-                        match target.about.as_ref().map(|a| a.kind()) {
-                            Some(trigon_core::ArtifactKind::Sdist) => "sdist".to_string(),
-                            _ => "wheel".to_string(),
-                        },
-                    ),
-                    // Both derived from `VENV` rather than written out, so the venv the deps
-                    // phase creates and the one the build phase looks in cannot come apart. They
-                    // were three literals agreeing by eye.
-                    ("locator".to_string(), format!("{VENV}/bin/")),
-                    // Always set now, not only where a backend was read: the constraints file
-                    // also carries the exclusion of the artifact under test, so it is written on
-                    // every PyPI build and the build phase has to be pointed at it either way.
-                    ("constraints".to_string(), format!("{VENV}/constraints.txt")),
-                    // Isolation stays on. `-n` makes the frontend *check* for each declared build
-                    // requirement rather than install it, so anything the project needs beyond the
-                    // backend goes missing — `attrs` wants `hatch-vcs` and `hatch-fancy-pypi-readme`
-                    // and stops with "Unmet dependencies". The backend version is pinned by a
-                    // constraint instead, which binds the environment the frontend builds without
-                    // taking over what goes into it.
-                    ("no_isolation".to_string(), "false".to_string()),
-                ]),
-            )],
+            build: vec![uses("pypi/build/wheel", pypi_build(target))],
             output_dir: Some(match &subdir {
                 Some(d) => format!("{}/dist", d.trim_end_matches('/')),
                 None => "dist".into(),
@@ -821,6 +761,81 @@ pub(crate) fn build_backend_pin(target: &ResolvedTarget) -> Option<String> {
             }
             _ => None,
         })
+}
+
+/// What `pypi/deps/basic` is given on every PyPI build, whichever rung lowered the recipe.
+///
+/// One construction for this rung and the CI rung (`ci/lower.rs`), because two drifted: the CI
+/// lowering was written beside this one, and when the exclusion and the always-written constraints
+/// file arrived here it kept the shape from before them. The CI rung sits above this one and
+/// displaces its candidate, so a recipe from it put the artifact under test back within reach of
+/// its own build.
+pub(crate) fn pypi_deps(target: &ResolvedTarget) -> BTreeMap<String, String> {
+    // See `VENV`: the path is a constant because four places have to agree on it.
+    // `/trigon/deps`, not `/deps`. The root directory of a Debian image is mode 0555, and root
+    // writes there only through `CAP_DAC_OVERRIDE` — which the sandbox drops, deliberately and by
+    // name. So `python3 -m venv /deps` is `Permission denied` for root, and only at an enforced
+    // tier: `defer_deps` moves the deps phase out of the image build and into the container run, so
+    // the same recipe worked at `--egress open` with full capabilities and failed at `mirror-only`
+    // with none. A build that succeeds at one tier and fails at another for a reason that has
+    // nothing to do with the package, reported as the package's fault.
+    //
+    // `/trigon` is ours and already in the image — the phase scripts are copied there — so it
+    // exists at run time, is owned by root at 0755, and needs no capability to write to. `/tmp`
+    // would also work today and is the worse choice: it is world-writable, and a tmpfs mounted over
+    // it (which `docs/12-security.md` §5 wants) would empty it between the image build and the run
+    // without anything saying so.
+    let mut deps = BTreeMap::from([("venv".to_string(), VENV.to_string())]);
+    // A build must not consume the artifact it is reproducing. Ordinarily nothing tries — but a
+    // package that is part of the machinery that builds packages does, because the frontend needs
+    // it: rebuilding `packaging` or `pyproject-hooks` makes pip ask for the very version under
+    // test, the mirror refuses it, and the build dies. Excluding that one version lets the resolver
+    // take the release before it, which is the right thing for a build tool to build itself with.
+    deps.insert(
+        "exclude_self".into(),
+        format!(
+            "{}!={}",
+            target.reference.registry_name(),
+            target.reference.version
+        ),
+    );
+    deps
+}
+
+/// What `pypi/build/wheel` is given on every PyPI build, whichever rung lowered the recipe. See
+/// [`pypi_deps`] for why the two rungs share it.
+pub(crate) fn pypi_build(target: &ResolvedTarget) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("kind".to_string(), pypi_kind(target).to_string()),
+        // Both derived from `VENV` rather than written out, so the venv the deps phase creates and
+        // the one the build phase looks in cannot come apart. They were three literals agreeing by
+        // eye.
+        ("locator".to_string(), format!("{VENV}/bin/")),
+        // Always set now, not only where a backend was read: the constraints file also carries the
+        // exclusion of the artifact under test, so it is written on every PyPI build and the build
+        // phase has to be pointed at it either way.
+        ("constraints".to_string(), format!("{VENV}/constraints.txt")),
+        // Isolation stays on. `-n` makes the frontend *check* for each declared build requirement
+        // rather than install it, so anything the project needs beyond the backend goes missing —
+        // `attrs` wants `hatch-vcs` and `hatch-fancy-pypi-readme` and stops with "Unmet
+        // dependencies". The backend version is pinned by a constraint instead, which binds the
+        // environment the frontend builds without taking over what goes into it.
+        ("no_isolation".to_string(), "false".to_string()),
+    ])
+}
+
+/// Which distribution a PyPI recipe builds: `sdist` or `wheel`, as `pypi/build/wheel`'s `kind`.
+///
+/// **Build what will be compared, not what is usual.** `preferred()` picks the sdist for a package
+/// whose only wheels are platform-specific — correctly, because such a wheel is built on one
+/// machine and does not reproduce on another — and a wheel built here would then be compared
+/// against it. The comparator took its format from the upstream name and called the sdist a
+/// malformed gzip. A wheel where nothing has chosen yet.
+pub(crate) fn pypi_kind(target: &ResolvedTarget) -> &'static str {
+    match target.about.as_ref().map(|a| a.kind()) {
+        Some(trigon_core::ArtifactKind::Sdist) => "sdist",
+        _ => "wheel",
+    }
 }
 
 fn evidence_value(target: &ResolvedTarget, source: &str) -> Option<String> {

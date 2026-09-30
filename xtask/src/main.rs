@@ -511,9 +511,10 @@ fn verifier_tree() -> Result<Vec<String>> {
         // a verifier that acquired a database client would have given up the property the build
         // exists to demonstrate without anybody editing a manifest.
         "sqlx",
-        // The `wasm` feature exists and is off by default. It nearly doubles this tree, so a
-        // verifier that acquired it by accident — a default-features slip, a feature unified in
-        // from elsewhere — would have quietly given up the property the build exists to demonstrate.
+        // The `wasm` feature is part of the full build (`build` enables it) and off here unless
+        // asked for with `--features wasm`. It nearly doubles this tree, so a verifier that
+        // acquired it by accident — a default-features slip, a feature unified in from elsewhere —
+        // would have quietly given up the property the build exists to demonstrate.
         "wasmtime",
     ];
     let out = std::process::Command::new(env!("CARGO"))
@@ -660,5 +661,40 @@ mod tests {
         let err = super::check_policy_with(&[], &["serde"])
             .expect_err("serde declares features, so requiring none must fail");
         assert!(err.to_string().contains("serde declares"), "{err}");
+    }
+
+    /// `scripts/threat-model-sidecar.py` answers `--help` and refuses an argument it does not know
+    /// before it reads or writes anything. It took every argument it did not know as a request to
+    /// regenerate, so `--help` rewrote `docs/threat-model.yaml`. Run on a copy of the script alone,
+    /// so one that did regenerate would find no prose here, and write nothing either.
+    #[test]
+    fn the_sidecar_script_writes_nothing_for_help_or_an_argument_it_does_not_know() {
+        let root = std::env::temp_dir().join(format!("xtask-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let script = root.join("scripts/threat-model-sidecar.py");
+        let original = super::workspace_root().join("scripts/threat-model-sidecar.py");
+        std::fs::copy(original, &script).unwrap();
+        let run = |arg: &str| {
+            std::process::Command::new("python3")
+                .arg(&script)
+                .arg(arg)
+                .output()
+                .expect("python3 runs")
+        };
+
+        let out = run("--help");
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("Regenerate docs/threat-model.yaml"), "{said}");
+
+        let out = run("--bogus");
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("unknown argument: --bogus"), "{said}");
+
+        assert!(!root.join("docs/threat-model.yaml").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

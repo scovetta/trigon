@@ -6,15 +6,16 @@
 //! bare repository's path and a relative path, and from `TRIGON_EVIDENCE_REPO` with its keys; a
 //! checkpoint that does not extend the accepted one — another log of the same size, pushed with
 //! force — is refused with both signed notes and the old clone kept; a rollback behind the state is
-//! refused, served or on disk; mirrors in agreement, one lagging, one equivocating; trust on first
-//! use recorded once and labelled everywhere; stale from the last sync and frozen from the newest
-//! leaf, time stated rather than waited for; a key change and a succession followed on sync, into
-//! another repository too; a lost state reported and accepted only when asked, starting over only
-//! what was lost; a sync stopped partway made again, never taken for one that finished; a branch
-//! named as an option never fetched; a repository's own attributes changing nothing verified; a
-//! source whose state cannot be read unknown, and the others answering; `add`, `list` and `remove`
-//! keeping the file as it was; a project's file held to its rules, its successor to HTTPS, and its
-//! sources labelled; and pruning one of an agreeing pair keeping the bytes the other names.
+//! refused, served or on disk; mirrors in agreement, one lagging, one equivocating, and one with no
+//! log at all set aside while the others answer; trust on first use recorded once and labelled
+//! everywhere; stale from the last sync and frozen from the newest leaf, time stated rather than
+//! waited for; a key change and a succession followed on sync, into another repository too; a lost
+//! state reported and accepted only when asked, starting over only what was lost; a sync stopped
+//! partway made again, never taken for one that finished; a branch named as an option never
+//! fetched; a repository's own attributes changing nothing verified; a source whose state cannot
+//! be read unknown, and the others answering; `add`, `list` and `remove` keeping the file as it
+//! was; a project's file held to its rules, its successor to HTTPS, and its sources labelled; and
+//! pruning one of an agreeing pair keeping the bytes the other names.
 //!
 //! Publishable runs are made the way phase 3 records them — two agreeing attempts at one cache key,
 //! on two machines, two hours apart — from artifacts compared here, not built by podman, as
@@ -29,6 +30,8 @@ use trigon_attest::log::{
     verify_log,
 };
 use trigon_store::{ArtifactRef, CacheState, Environment, RunRecord, RunState, Store};
+
+mod set_module;
 
 const ORIGIN: &str = "example.com/trigon-evidence";
 const DISPUTES: &str = "https://example.com/trigon-evidence/issues";
@@ -102,15 +105,16 @@ impl World {
         self.dir.join("home/.config/trigon/evidence.toml")
     }
 
-    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel and the log key,
-    /// and `extra` after them.
+    /// `evidence.toml`, with `[publish]` naming the origin, the dispute channel, the log key and
+    /// the stabilizer-set module, and `extra` after them.
     fn config(&self, extra: &str) {
         std::fs::write(
             self.config_path(),
             format!(
                 "[publish]\norigin = \"{ORIGIN}\"\ndisputes = \"{DISPUTES}\"\n\
-                 log_key = \"{}\"\n{extra}",
-                self.log_key.display()
+                 log_key = \"{}\"\nstabilizer_module = \"{}\"\n{extra}",
+                self.log_key.display(),
+                set_module::built().display()
             ),
         )
         .unwrap();
@@ -927,6 +931,166 @@ fn mirrors_in_agreement_lagging_and_equivocating() {
     );
 }
 
+/// A bare repository holding a README and nothing else, as a mistyped URL may name, and the
+/// working copy it was cloned from, whose `main` can be pushed over another repository.
+fn readme_only(w: &World) -> (PathBuf, PathBuf) {
+    let src = w.dir.join("readme-src");
+    git(
+        &w.dir,
+        &["init", "--quiet", "-b", "main", src.to_str().unwrap()],
+    );
+    std::fs::write(src.join("README"), "not an evidence repository\n").unwrap();
+    git(&src, &["add", "README"]);
+    git(&src, &["commit", "--quiet", "-m", "a readme"]);
+    let bare = w.dir.join("readme.git");
+    git(
+        &w.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    (src, bare)
+}
+
+/// A location that serves a repository with no log at all — a mistyped URL, a mirror nothing has
+/// been published to — is set aside as unreadable, said with its URL and the likely causes, and
+/// the others answer; a source whose every location is like that could not be synced, never
+/// refused: it answers from its clone until the clone is stale, as a source not reached does, and
+/// is unknown if it never synced. A log that is there and does not verify still refuses the
+/// source, as the equivocating mirror above does.
+#[test]
+fn a_location_with_no_log_is_set_aside_and_the_others_answer() {
+    let w = World::new("no-log");
+    w.init();
+    let p = Package::new("a", false);
+    w.publish_package("a", "aaaa");
+    let (src, bare) = readme_only(&w);
+    let remote = format!("file://{}", w.remote.display());
+    let empty = format!("file://{}", bare.display());
+
+    ok(&w.add("main", &[remote.as_str(), empty.as_str()], &[]));
+    let said = ok(&w.sync(&[]));
+    assert!(
+        said.contains("remote.git (file): 1 leaves, answering"),
+        "{said}"
+    );
+    assert!(
+        said.contains("readme.git (file): unreachable: its log could not be read"),
+        "{said}"
+    );
+    assert!(said.contains("readme.git serves no log at all"), "{said}");
+    assert!(said.contains("a mistyped one"), "{said}");
+    assert!(!said.contains("REFUSED"), "{said}");
+    let list = w.list();
+    assert_eq!(list["main"]["standing"], "fresh", "{list}");
+    let said = exits(&w.trigon(&["lookup", &p.target()]), 0);
+    assert!(said.contains("main"), "{said}");
+
+    // Every location like that, of a source never synced: a sync that failed, and a source that
+    // answers unknown.
+    ok(&w.add("nothing", &[empty.as_str()], &[]));
+    let said = exits(&w.sync(&["--source", "nothing"]), 4);
+    assert!(said.contains("failed    it could not be synced"), "{said}");
+    assert!(!said.contains("REFUSED"), "{said}");
+    assert!(said.contains("A mistyped URL"), "{said}");
+    let list = w.list();
+    assert_eq!(list["nothing"]["standing"], "unknown", "{list}");
+
+    // Every location like that, of a source that synced before: its only mirror now serves the
+    // README alone. The sync fails, its clone is put back, and the source answers from it until
+    // it is stale, as one that could not be reached does.
+    let emptied = w.mirror("emptied.git");
+    let url = format!("file://{}", emptied.display());
+    ok(&w.add("emptied", &[url.as_str()], &[]));
+    ok(&w.sync(&["--source", "emptied"]));
+    let accepted = std::fs::read(w.state("emptied").join("checkpoint")).unwrap();
+    git(
+        &src,
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            emptied.to_str().unwrap(),
+            "main:main",
+        ],
+    );
+    let said = exits(&w.sync(&["--source", "emptied"]), 4);
+    assert!(said.contains("failed    it could not be synced"), "{said}");
+    assert!(!said.contains("REFUSED"), "{said}");
+    assert!(said.contains("A mistyped URL"), "{said}");
+    assert!(
+        said.contains("it answers from its clone until it is stale"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(w.state("emptied").join("checkpoint")).unwrap(),
+        accepted
+    );
+    let list = w.list();
+    assert_eq!(list["emptied"]["standing"], "usable", "{list}");
+    let said = exits(&w.trigon(&["lookup", &p.target()]), 0);
+    assert!(said.contains("emptied"), "{said}");
+}
+
+/// Trust on first use passes over a location that serves no log at all, as a sync sets one aside:
+/// with a mistyped URL first, the keys are read from the first location that holds a log, and the
+/// sync works rather than stopping on the first URL's missing `keys/` before the second is read.
+#[test]
+fn trust_on_first_use_reads_its_keys_from_the_first_location_holding_a_log() {
+    let w = World::new("tofu-no-log");
+    w.init();
+    w.publish_package("a", "aaaa");
+    let (_, bare) = readme_only(&w);
+    let empty = format!("file://{}", bare.display());
+    let remote = w.remote.to_str().unwrap();
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "tofu",
+        &empty,
+        remote,
+        "--trust-on-first-use",
+    ]));
+    let said = ok(&w.sync(&[]));
+    assert!(
+        said.contains("readme.git serves no log at all, so no key is read from its keys/"),
+        "{said}"
+    );
+    assert!(
+        said.contains("readme.git serves no log at all, and is set aside"),
+        "{said}"
+    );
+    assert!(
+        said.contains("trusting on first use: the log key"),
+        "{said}"
+    );
+    assert!(!said.contains("REFUSED"), "{said}");
+    let keys: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(w.state("tofu").join("keys")).unwrap()).unwrap();
+    assert_eq!(keys["logKey"], w.vkey().to_string());
+    assert_eq!(keys["attestationKey"], attestation().public_hex());
+    assert_eq!(keys["firstUse"]["readFrom"], remote);
+    let list = w.list();
+    assert_eq!(list["tofu"]["standing"], "fresh", "{list}");
+
+    // Only such a location: reached, and still nothing to read a key from, which is said.
+    ok(&w.trigon(&["evidence", "add", "readme", &empty, "--trust-on-first-use"]));
+    let said = exits(&w.sync(&["--source", "readme"]), 4);
+    assert!(
+        said.contains(
+            "`readme` trusts on first use, and no location of it that could be reached holds a \
+             log to read its keys from"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("REFUSED"), "{said}");
+    assert!(!w.state("readme").join("keys").exists());
+}
+
 /// Trust on first use: a source that pins no key reads the repository's `keys/` on its first
 /// sync, records them, and every answer from it says it rests on them — `evidence list`, and the
 /// record form of `verify-attestation`, which reads the recorded keys instead of refusing it. The
@@ -1164,6 +1328,10 @@ fn a_key_change_and_a_succession_are_followed_on_sync() {
         accepted.starts_with("example.com/trigon-evidence/1\n"),
         "{accepted}"
     );
+    // And it is the checkpoint `sync` and `list` print, the one answers are given from.
+    let (line, json) = printed(accepted.as_bytes());
+    assert!(said.lines().any(|l| l == line), "{line}: {said}");
+    assert_eq!(w.list()["main"]["checkpoint"], json);
 
     // A history kept that says less than the log: reported, and written again from the log.
     let mut edited = keys.clone();
@@ -2325,4 +2493,70 @@ fn a_missing_sync_record_or_key_history_is_made_again_and_said() {
             accepted
         );
     }
+}
+
+/// The line every report prints of the checkpoint `note` holds, read from the note itself:
+/// `checkpoint <origin> <size> <root>`, the root as the note spells it; and its JSON.
+fn printed(note: &[u8]) -> (String, serde_json::Value) {
+    let text = String::from_utf8(note.to_vec()).unwrap();
+    let mut lines = text.lines();
+    let (origin, size, root) = (
+        lines.next().unwrap(),
+        lines.next().unwrap(),
+        lines.next().unwrap(),
+    );
+    (
+        format!("checkpoint {origin} {size} {root}"),
+        serde_json::json!({
+            "origin": origin,
+            "size": size.parse::<u64>().unwrap(),
+            "root": root,
+        }),
+    )
+}
+
+/// `evidence sync` prints, under what it synced, the checkpoint it accepted, as every report that
+/// answers from a source prints the checkpoint it answered from; `evidence list` prints the same
+/// line, and carries it in JSON as `checkpoint`: each the checkpoint the state holds, byte for
+/// byte the one accepted. A source whose clones do not open answers from no checkpoint, and `list`
+/// says only what its last sync recorded.
+#[test]
+fn sync_and_list_print_the_checkpoint_accepted() {
+    let w = World::new("checkpoint-line");
+    w.init();
+    w.publish_package("a", "aaaa");
+    ok(&w.add("main", &[&format!("file://{}", w.remote.display())], &[]));
+    let mut lines = Vec::new();
+    for (name, tag) in [("b", "bbbb"), ("c", "cccc")] {
+        let said = ok(&w.sync(&[]));
+        let (line, json) = printed(&std::fs::read(w.state("main").join("checkpoint")).unwrap());
+        let synced: Vec<&str> = said.lines().collect();
+        let at = synced
+            .iter()
+            .position(|l| l.starts_with("synced    "))
+            .unwrap_or_else(|| panic!("{said}"));
+        assert_eq!(synced[at + 1], line, "{said}");
+        let said = ok(&w.trigon(&["evidence", "list"]));
+        assert!(said.lines().any(|l| l == line), "{line}: {said}");
+        assert_eq!(w.list()["main"]["checkpoint"], json);
+        lines.push(line);
+        w.publish_package(name, tag);
+    }
+    assert!(lines[0].starts_with(&format!("checkpoint {ORIGIN} 1 ")));
+    assert!(lines[1].starts_with(&format!("checkpoint {ORIGIN} 2 ")));
+
+    std::fs::remove_file(w.state("main").join("checkpoint")).unwrap();
+    let said = ok(&w.trigon(&["evidence", "list"]));
+    assert!(
+        said.contains(&format!(
+            "recorded  2 leaves of `{ORIGIN}`, by its last sync: nothing answers from its clones \
+             now"
+        )),
+        "{said}"
+    );
+    assert!(
+        !said.lines().any(|l| l.starts_with("checkpoint ")),
+        "{said}"
+    );
+    assert_eq!(w.list()["main"]["checkpoint"], serde_json::Value::Null);
 }

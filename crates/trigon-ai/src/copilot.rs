@@ -56,6 +56,14 @@ const INERT_TOOL: &str = "fetch_copilot_cli_documentation";
 /// How long one call may take before the process is killed.
 const DEADLINE: Duration = Duration::from_secs(600);
 
+/// The most bytes Linux passes a program in one argument, counting the NUL that ends it.
+///
+/// `MAX_ARG_STRLEN`, which is 32 pages: 128 KiB with the 4 KiB pages x86-64 always has. A kernel
+/// built with larger pages allows more, and a prompt between the two bounds is refused here rather
+/// than the page size guessed at. The prompt is one argument, and one over this fails the spawn
+/// with `E2BIG`.
+const ONE_ARGUMENT: usize = 32 * 4096;
+
 #[derive(Debug)]
 pub struct Copilot {
     binary: String,
@@ -150,10 +158,26 @@ impl Provider for Copilot {
 
 impl Copilot {
     fn attempt(&self, req: &Request) -> Result<Response, LlmError> {
+        let prompt = self.prompt(req);
+        // **Measured before the spawn, not read off its failure.** `-p` takes the whole prompt as
+        // one argument, and large manifests or a long build log make one longer than Linux passes.
+        // The spawn failed with `E2BIG`, which was reported as a CLI that needed installing and
+        // asked again as a transport fault, though the next attempt is the same size. Handing the
+        // prompt over some other way depends on what the CLI accepts (`docs/17-backlog.md` B29).
+        if cfg!(target_os = "linux") && prompt.len() >= ONE_ARGUMENT {
+            return Err(LlmError::PromptTooLarge {
+                bytes: prompt.len(),
+                limit: format!(
+                    "the Copilot CLI takes it as one command-line argument, which Linux holds to \
+                     {} bytes",
+                    ONE_ARGUMENT - 1
+                ),
+            });
+        }
         let mut child = Command::new(&self.binary)
             .current_dir(&self.workdir)
             .arg("-p")
-            .arg(self.prompt(req))
+            .arg(&prompt)
             .args(["--output-format", "json"])
             // The controls, each of which the module docs explain. Kept together and in one place
             // so a reader can see the whole posture at once.
@@ -172,12 +196,7 @@ impl Copilot {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| {
-                LlmError::Transport(format!(
-                    "could not run `{}`: {e}. The Copilot CLI has to be installed and signed in.",
-                    self.binary
-                ))
-            })?;
+            .map_err(|e| self.spawn_failed(prompt.len(), e))?;
 
         // **Read while it runs, not after it exits.** A pipe holds 64 KiB, and the CLI writes every
         // reasoning chunk as a line of JSONL, so a long turn fills it. A child blocked writing to a
@@ -207,6 +226,29 @@ impl Copilot {
         let stdout = stdout.join().unwrap_or_default();
         let stderr = stderr.join().unwrap_or_default();
         parse(&stdout, &stderr, &req.model)
+    }
+
+    /// Why the CLI did not start, as the error that says what to do about it.
+    ///
+    /// The install hint only where the binary is missing. It was on every failure, so a prompt too
+    /// long for the command line read as a CLI that needed installing.
+    fn spawn_failed(&self, bytes: usize, e: std::io::Error) -> LlmError {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => LlmError::Transport(format!(
+                "could not run `{}`: {e}. The Copilot CLI has to be installed and signed in.",
+                self.binary
+            )),
+            // Where the check before the spawn does not apply, or where the whole command line is
+            // what is too long: the same prompt meets the same bound next time.
+            std::io::ErrorKind::ArgumentListTooLong => LlmError::PromptTooLarge {
+                bytes,
+                limit: format!(
+                    "the command line that hands it to the Copilot CLI is longer than this system \
+                     allows ({e})"
+                ),
+            },
+            _ => LlmError::Transport(format!("could not run `{}`: {e}", self.binary)),
+        }
     }
 }
 
@@ -1321,6 +1363,60 @@ esac
         let text = e.to_string();
         assert!(text.contains("no-such-copilot"), "{text}");
         assert!(text.contains("installed and signed in"), "{text}");
+    }
+
+    #[test]
+    fn only_a_cli_that_is_missing_is_told_to_install_it() {
+        // A file that is there and cannot be run is not fixed by installing anything.
+        let f = fake("not-runnable");
+        let binary = f.dir.join("copilot");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let e = f.copilot.complete(&asking("answer")).unwrap_err();
+        assert!(matches!(e, LlmError::Transport(_)), "{e:?}");
+        assert!(!e.to_string().contains("installed"), "{e}");
+
+        // And a command line the system will not pass is the prompt's size, which the next
+        // attempt shares.
+        let e = f.copilot.spawn_failed(
+            300_000,
+            std::io::Error::from(std::io::ErrorKind::ArgumentListTooLong),
+        );
+        assert!(
+            matches!(e, LlmError::PromptTooLarge { bytes: 300_000, .. }),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(text.contains("300000 bytes"), "{text}");
+        assert!(text.contains("longer than this system allows"), "{text}");
+        assert!(!text.contains("installed"), "{text}");
+        assert!(!trigon_core::Classify::is_retryable(&e));
+    }
+
+    /// Linux only, where one argument has a bound of its own. Elsewhere the whole command line
+    /// is what is bounded, and the spawn's own `E2BIG` is read as above.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_prompt_longer_than_one_argument_is_refused_before_anything_runs() {
+        // Large manifests and a long build log make a prompt over the 128 KiB Linux passes in one
+        // argument. The spawn failed with `E2BIG`, reported as a CLI that needed installing and
+        // asked again, though the next attempt is the same size.
+        let f = fake("too-long");
+        let mut req = asking("answer");
+        req.prompt = Prompt::new("You propose build recipes.")
+            .stable("prelude")
+            .volatile("x".repeat(200 * 1024));
+        let bytes = f.copilot.prompt(&req).len();
+        let e = f.copilot.complete(&req).unwrap_err();
+        assert!(
+            matches!(e, LlmError::PromptTooLarge { bytes: b, .. } if b == bytes),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(text.contains(&format!("{bytes} bytes")), "{text}");
+        assert!(text.contains("131071 bytes"), "{text}");
+        assert!(!text.contains("installed"), "{text}");
+        assert!(!trigon_core::Classify::is_retryable(&e));
+        assert_eq!(f.calls(), 0, "nothing ran");
     }
 
     #[test]

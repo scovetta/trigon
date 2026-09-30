@@ -63,6 +63,18 @@ impl Flavor {
         !matches!(self, Flavor::OpenAi)
     }
 
+    /// Whether this endpoint is sent a depth, as `reasoning_effort`.
+    ///
+    /// Where it is known to take one, and nowhere else. Ollama was observed to honour it, and
+    /// OpenAI's current models, which this flavour already assumes, take it with every value
+    /// [`Effort`] has. OpenRouter and a `compatible:` endpoint front models nobody here has seen,
+    /// and a field some member of the "OpenAI-compatible" family rejects is a provider failing for
+    /// reasons that read as ours. They are sent nothing and think at their own default. Widen it
+    /// per flavour, on evidence, as [`OpenAiCompatible::with_reasoning`] does.
+    fn takes_reasoning_effort(self) -> bool {
+        matches!(self, Flavor::Ollama | Flavor::OpenAi)
+    }
+
     fn output_cap_field(self) -> &'static str {
         match self {
             Flavor::OpenAi => "max_completion_tokens",
@@ -159,10 +171,11 @@ impl OpenAiCompatible {
 
     /// Ask this endpoint to answer without a reasoning trace.
     ///
-    /// Only Ollama is sent the field. OpenAI's `reasoning_effort` takes a different set of values
-    /// and answers 400 on one it does not know, and sending a parameter that some endpoint in the
-    /// "OpenAI-compatible" family might reject is how a provider starts failing for reasons that
-    /// read as ours. Widen it per flavour, on evidence, rather than by hope.
+    /// Only Ollama is sent `reasoning_effort: none`. OpenAI's `reasoning_effort` takes a different
+    /// set of values — the depths `Flavor::takes_reasoning_effort` sends it — and answers 400 on
+    /// one it does not know, and sending a parameter that some endpoint in the "OpenAI-compatible"
+    /// family might reject is how a provider starts failing for reasons that read as ours. Widen
+    /// it per flavour, on evidence, rather than by hope.
     pub fn with_reasoning(mut self, r: Reasoning) -> Self {
         self.reasoning = r;
         self
@@ -231,10 +244,9 @@ impl OpenAiCompatible {
         if self.flavor.takes_temperature() {
             body["temperature"] = json!(req.temperature);
         }
-        if let Some(effort) = req.effort {
-            // Same three words as Anthropic's `output_config.effort`. An endpoint that does not
-            // know the field ignores it, which is the same best-effort contract the rest of this
-            // builder works on.
+        if let (true, Some(effort)) = (self.flavor.takes_reasoning_effort(), req.effort) {
+            // Same three words as Anthropic's `output_config.effort`, and only where the flavour is
+            // known to take them.
             body["reasoning_effort"] = json!(effort.as_str());
         }
         if (self.flavor, req.reasoning) == (Flavor::Ollama, Reasoning::Off) {
@@ -911,14 +923,35 @@ mod tests {
         // Beside the schema, not instead of it.
         assert_eq!(anthropic["output_config"]["format"]["type"], "json_schema");
 
-        // Ollama only. `body()` sends the field to every OpenAI-shaped flavour, while
-        // `with_reasoning` says to send `reasoning_effort` only where it has been seen to work;
-        // which of the two is meant for OpenAI, OpenRouter and the rest is the owner's to say, so
-        // neither answer is held here.
+        // And to an OpenAI-shaped flavour known to take it; which ones is the test below.
         let ollama = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
             .unwrap()
             .body(&req);
         assert_eq!(ollama["reasoning_effort"], "low", "{ollama}");
+    }
+
+    #[test]
+    fn a_depth_reaches_the_flavours_known_to_take_it_and_no_other() {
+        // `propose` asks every call at the provider's default depth, so a field sent to every
+        // flavour reached OpenRouter and every `compatible:` endpoint on every proposal, against
+        // `with_reasoning`'s rule that the family is widened on evidence and not by hope.
+        let mut req = probe("s");
+        req.effort = Some(Effort::Medium);
+        for (flavor, sent) in [
+            (Flavor::Ollama, Some("medium")),
+            (Flavor::OpenAi, Some("medium")),
+            (Flavor::OpenRouter, None),
+            (Flavor::Other, None),
+        ] {
+            let body = OpenAiCompatible::new("http://x/v1", None, flavor)
+                .unwrap()
+                .body(&req);
+            assert_eq!(
+                body.get("reasoning_effort").and_then(Value::as_str),
+                sent,
+                "{flavor:?}: {body}"
+            );
+        }
     }
 
     #[test]

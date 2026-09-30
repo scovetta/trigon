@@ -11,12 +11,12 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:3c0866a77b3cb48f5508c7d788ab087be3e46398e0b1a4f601c0613404f498f2
+prose_version: docs/threat-model.md@sha256:a674cbb7b42c295b11d9b7e9662ce14301b3fc642c05134994696c9308f48150
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 270
-  maintainer: 0
+  documented: 278
+  maintainer: 1
   inferred: 5
   assumption: 3
 components:
@@ -55,7 +55,10 @@ components:
     source: docs/threat-model.md §1.2
 - name: archived-stabilizer-sets
   scope: in
-  reachability_precondition: a .wasm module the operator passed to --stabilizers
+  reachability_precondition: a .wasm module the operator passed to --stabilizers or to attest --stabilizer-module
+    (or named as [publish] stabilizer_module), or the module a verified record's evidence carries, run
+    only when its sha256 is the stabilizerSetModule its signed verdict names and the binary does not carry
+    the verdict's set
   provenance:
     kind: documented
     source: docs/threat-model.md §1.2
@@ -82,7 +85,8 @@ components:
   reachability_precondition: a flag, a work directory on disk, an HTTP request to watch, the evidence
     repository trigon publish fetches, or those trigon evidence sync clones — every location of every
     source, and every successor a log-end names — which whoever can push to them wrote, or serves (A8,
-    A9); or a project's .trigon/evidence.toml, chosen by the thing under test
+    A9); or a project's .trigon/evidence.toml, chosen by the thing under test; or a file handed to trigon
+    runs import, which whoever made it wrote
   provenance:
     kind: documented
     source: docs/threat-model.md §1.2
@@ -393,7 +397,7 @@ host_side_effects:
   conditions: 'only with --model copilot:'
   provenance:
     kind: documented
-    source: crates/trigon-ai/src/copilot.rs:133
+    source: crates/trigon-ai/src/copilot.rs:177
 - effect: Outbound HTTPS to a model endpoint
   stance: conditional
   components: []
@@ -448,6 +452,15 @@ host_side_effects:
     kind: documented
     source: crates/trigon/src/publish/mod.rs — `prune_published`; crates/trigon/src/main.rs — `refuse_prune_before_publication`;
       crates/trigon-store/src/lib.rs — `prune_rebuild`
+- effect: Writing a store from a file another machine made
+  stance: conditional
+  components: []
+  conditions: 'only trigon runs import: the blobs, set manifests, statements and records the file carries,
+    once all of it is checked, under the store''s own names, never a statement over another (P47). trigon
+    runs export writes the one file --out names and reads the store without writing to it'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/transfer.rs
 - effect: trigon serve reading the publisher's working clone
   stance: conditional
   components: []
@@ -554,11 +567,13 @@ entry_points:
     - resource-name
     - collaborator-implementation
     - x-wasm-module
-    caller_must_enforce: the operator decides which archived set to trust and run; an id alone executes
+    caller_must_enforce: a module is run only when its sha256 is the stabilizerSetModule the signed verdict
+      names, or, for a statement that names none, when the operator passes it; that binding, and not the
+      set digest the module reports of itself, is what makes it trustworthy (P23, D39); an id alone executes
       nothing
     provenance:
       kind: documented
-      source: docs/09-attestations.md §7.1
+      source: docs/09-attestations.md §7.1; crates/trigon-attest/src/verify.rs — `check_set_module`
 - id: Registry::resolve
   component: multiple
   parameters:
@@ -764,6 +779,29 @@ entry_points:
     provenance:
       kind: documented
       source: 'crates/trigon-store/src/lib.rs:204; verified against object_store 0.12: `..` → `%2E%2E`'
+- id: trigon runs import
+  component: multiple
+  parameters:
+  - name: 'the file: its manifest, run records, blobs, statements and stabilizer-set manifests'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    - serialized-state
+    caller_must_enforce: 'nothing for the file — P47: it is read within the ceiling an artifact may expand
+      to and never decompressed, every entry a regular file at a path an export writes, every blob held
+      to its name, every record to its file name, every file a record names carried, and nothing written
+      until all of it is checked. The records'' claims — host id, start time, cache state, image pin —
+      are the maker''s word, trusted as a store''s co-writer''s are, and so is what rebuild --confirm
+      of an imported run repeats: the strategy the file carries, the source it fetches and the commands
+      it runs, on the base image and at the egress tier the record names (D40)'
+    provenance:
+      kind: documented
+      source: crates/trigon/src/transfer.rs — tests `an_import_is_checked_whole_before_anything_is_written`,
+        `a_run_already_here_is_left_alone_or_refused_and_nothing_else_is_written`, `a_run_filed_here_after_the_import_looked_is_never_written_over`,
+        `a_failed_import_leaves_no_record_naming_blobs_that_are_not_there`
 - id: verify-attestation
   component: multiple
   parameters:
@@ -887,8 +925,8 @@ entry_points:
 - id: trigon evidence sync, trusting on first use
   component: multiple
   parameters:
-  - name: keys/log.vkey and keys/attestation.pub of the first location reached, on the source's first
-      sync
+  - name: keys/log.vkey and keys/attestation.pub of the first location reached that holds a log, on the
+      source's first sync; one serving no log at all is passed over, with a note
     attacker_controllable: true
     control_kinds:
     - data
@@ -897,7 +935,8 @@ entry_points:
       from the source says it rests on them (D33)'
     provenance:
       kind: documented
-      source: docs/19-distribution-and-lookup.md §2.4, §6.1; crates/trigon/tests/evidence.rs — `trust_on_first_use_is_recorded_once_and_every_answer_says_it_rests_on_it`
+      source: docs/19-distribution-and-lookup.md §2.4, §6.1; crates/trigon/tests/evidence.rs — `trust_on_first_use_is_recorded_once_and_every_answer_says_it_rests_on_it`,
+        `trust_on_first_use_reads_its_keys_from_the_first_location_holding_a_log`
 - id: trigon lookup, trigon check, verify-attestation --lookup
   component: multiple
   parameters:
@@ -1270,8 +1309,8 @@ contract_dimensions:
 - component: archived-stabilizer-sets
   dimension: callback-execution
   status: disclaimed
-  conditions: an archived set is third-party code the operator chose to run; wasmtime's sandbox is the
-    boundary and it is a dependency's guarantee
+  conditions: an archived set is code the operator chose to run, or the one a signed verdict names by
+    digest; wasmtime's sandbox is the boundary and it is a dependency's guarantee
   property_id: D21
   provenance:
     kind: documented
@@ -1279,7 +1318,9 @@ contract_dimensions:
 - component: archived-stabilizer-sets
   dimension: serialization-reconstruction
   status: claimed
-  conditions: the archived set is proved to agree with the compiled one before use
+  conditions: 'the archived set is proved to agree with the compiled one: by the parity test, and by attest,
+    which names a module only once it reproduces the run''s stabilized digests; a verifier runs only the
+    module whose sha256 the verdict signs'
   property_id: P23
   provenance:
     kind: documented
@@ -1310,8 +1351,8 @@ contract_dimensions:
 - component: archived-stabilizer-sets
   dimension: x-provenance-cap
   status: disclaimed
-  conditions: the cap cannot be confirmed from bytes alone, so a normalized claim degrades to normalized_with_caveats
-    and a true claim reads as refuted
+  conditions: 'the cap cannot be confirmed from bytes alone: a normalized claim re-derives as normalized_with_caveats
+    and is reported consistent, neither held nor refuted, and its tier is not re-derived'
   property_id: D18
   provenance:
     kind: documented
@@ -1895,6 +1936,25 @@ contract_dimensions:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-run-import
+  status: claimed
+  conditions: an import writes nothing until the whole file is checked, nothing no record in it names,
+    no statement over another, and each record after the blobs it names
+  property_id: P47
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-run-import-claims
+  status: disclaimed
+  conditions: an imported record's host id, start time, cache state and image pin are its maker's, and
+    the gate's same-host rule compares them as they came; rebuild --confirm of it repeats the strategy,
+    base image and egress tier it names
+  property_id: D40
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
 - component: definitions
   dimension: numeric-domain
   status: not-applicable
@@ -2051,89 +2111,102 @@ outputs:
       the log is'
     provenance: *id008
 - component: multiple
+  channel: a trigon runs export file
+  taint: same-as-input
+  taint_provenance: &id009
+    kind: documented
+    source: crates/trigon/src/transfer.rs
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-9
+    statement: 'that anything in it is true because it is there: its records'' claims are the exporting
+      store''s (D40), its artifacts are packages'' own builds, and once it leaves the machine it is anyone''s
+      bytes, which import checks again (P47)'
+    provenance: *id009
+- component: multiple
   channel: trigon evidence sync and evidence list
   taint: constrained
-  taint_provenance: &id009
+  taint_provenance: &id010
     kind: documented
     source: docs/19-distribution-and-lookup.md §6, §6.1
   invariants: []
   downstream_must_not_assume:
-  - id: mna-9
+  - id: mna-10
     statement: 'that a fresh source is current: within stale_after and frozen_after a newer checkpoint
       withheld is not detected (D32); that keys trusted on first use are the log''s (D33); that a source
       can answer at all (D34); or that list fetched anything — it touches no network'
-    provenance: *id009
+    provenance: *id010
 - component: multiple
   channel: trigon lookup and trigon check reports
   taint: constrained
-  taint_provenance: &id010
+  taint_provenance: &id011
     kind: documented
     source: docs/19-distribution-and-lookup.md §4.2, §6, §6.1
   invariants: []
   downstream_must_not_assume:
-  - id: mna-10
-    statement: that an answer is current beyond what D32 bounds; that a package never checked is safe,
-      or that one is exact because a different source says so; that --remote saw every supersession (D36);
-      that a record's evidence was checked — lookup and check read none of it, and say which files went
-      unchecked
-    provenance: *id010
+  - id: mna-11
+    statement: that an answer is current beyond what D32 bounds, or that two users whose checkpoint lines
+      match have seen everything logged — only that they were shown one tree at that size; that a package
+      never checked is safe, or that one is exact because a different source says so; that --remote saw
+      every super
+    provenance: *id011
 - component: multiple
   channel: verify-attestation --lookup report
   taint: constrained
-  taint_provenance: &id011
+  taint_provenance: &id012
     kind: documented
     source: docs/19-distribution-and-lookup.md §4.2 item 6, §6
   invariants: []
   downstream_must_not_assume:
-  - id: mna-11
+  - id: mna-12
     statement: that the rebuilt artifact was built independently — a release asset is the publisher's
       own bytes, so re-deriving from it checks the arithmetic, not the build (§1.12); or that a record
       not current in the source was checked
-    provenance: *id011
+    provenance: *id012
 - component: multiple
   channel: the build log (stored, rendered, prompted)
   taint: same-as-input
-  taint_provenance: &id012
+  taint_provenance: &id013
     kind: documented
     source: docs/18-management-ui.md §2
   invariants: []
   downstream_must_not_assume:
-  - id: mna-12
+  - id: mna-13
     statement: that credentials were redacted. They were not
-    provenance: *id012
+    provenance: *id013
 - component: multiple
   channel: trigon watch HTML
   taint: constrained
-  taint_provenance: &id013
+  taint_provenance: &id014
     kind: documented
     source: crates/trigon/src/main.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-13
+  - id: mna-14
     statement: that the page is authenticated, or safe to serve on a routable address
-    provenance: *id013
+    provenance: *id014
 - component: multiple
   channel: /api/state JSON
   taint: same-as-input
-  taint_provenance: &id014
+  taint_provenance: &id015
     kind: documented
     source: crates/trigon/src/watch.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-14
+  - id: mna-15
     statement: that it is access-controlled. It is not
-    provenance: *id014
+    provenance: *id015
 - component: multiple
   channel: the model transcript
   taint: same-as-input
-  taint_provenance: &id015
+  taint_provenance: &id016
     kind: documented
     source: docs/07-ai.md §8
   invariants: []
   downstream_must_not_assume:
-  - id: mna-15
+  - id: mna-16
     statement: that replaying it reproduces the result. It replays the model, not the world
-    provenance: *id015
+    provenance: *id016
 adversaries:
 - name: forged-attestation-attacker
   scope: in
@@ -2443,7 +2516,7 @@ build_flags:
     kind: documented
     source: docs/threat-model.md
 - name: wasm feature
-  default: 'off'
+  default: on in the full build (build enables it); off in the verifier unless --features wasm
   security_relevant: true
   maintainer_stance: supported
   affects_properties:
@@ -2451,7 +2524,7 @@ build_flags:
     effect: preserves
   provenance:
     kind: documented
-    source: crates/trigon/Cargo.toml
+    source: crates/trigon/Cargo.toml; docs/09-attestations.md §7.1
 - name: --egress open
   default: the default for rebuild and sweep
   security_relevant: true
@@ -2825,12 +2898,16 @@ properties_claimed:
   conditions: wasm feature
   violation_symptoms:
   - an archived set silently producing a different digest
+  - a substituted module making a claim re-derive
   statement: An archived stabilizer set is proved to agree with the compiled one before its digest is
-    used, and a trap in the module fails the re-derivation rather than producing a digest
+    used, and a trap in the module fails the re-derivation rather than producing a digest. trigon attest
+    names a module in a verdict only once it reports the run's set digest and stabilizes both stored artifacts
+    to the stabilized digests the run recorded. verify-attestation runs a module only when the sha256
+    of it
   provenance:
     kind: documented
     source: docs/16-findings.md — "run an archived stabilizer set, and prove it agrees with the compiled
-      one"
+      one"; docs/09-attestations.md §7.1
 - id: P24
   kind: correctness
   components:
@@ -2864,8 +2941,10 @@ properties_claimed:
   conditions: —
   violation_symptoms:
   - an artifact choosing what signs or stabilizes it
-  statement: Signer and the archived-set loader are operator-chosen collaborators, named on the command
-    line, never selected by anything in an artifact or an attestation
+  statement: Signer is an operator-chosen collaborator, named on the command line, never selected by anything
+    in an artifact or an attestation. The archived-set loader runs a module named on the command line
+    or in [publish] stabilizer_module, or the one a verified record's signed verdict names by sha256 where
+    the binary does not carry its set; never one an artifact or an unsigned part of a record selects
   provenance:
     kind: documented
     source: docs/09-attestations.md §6-7
@@ -3125,6 +3204,7 @@ properties_claimed:
   violation_symptoms:
   - two copies of one log that disagree, accepted
   - a smaller one answering over the larger
+  - a log that is there and does not verify set aside rather than refusing the source
   statement: 'The locations of a source are one log, or the source is refused. Every URL of a source —
     one log and its mirrors — and every location a log-end names for a successor is fetched and verified
     by itself, and then every copy is held to every other, over every log of the chain both hold: at the
@@ -3132,8 +3212,9 @@ properties_claimed:
     larger''s fir'
   provenance:
     kind: documented
-    source: docs/19-distribution-and-lookup.md §6.1, §8; crates/trigon/tests/evidence.rs — `mirrors_in_agreement_lagging_and_equivocating`;
-      crates/trigon-attest/tests/evidence_log/chains.rs — `copies_of_one_chain_are_one_chain_or_an_equivocation`
+    source: docs/19-distribution-and-lookup.md §6.1, §8; crates/trigon/tests/evidence.rs — `mirrors_in_agreement_lagging_and_equivocating`,
+      `a_location_with_no_log_is_set_aside_and_the_others_answer`; crates/trigon-attest/tests/evidence_log/chains.rs
+      — `copies_of_one_chain_are_one_chain_or_an_equivocation`, `a_repository_with_no_log_is_refused_saying_what_it_lacks`
 - id: P41
   kind: integrity
   components:
@@ -3278,6 +3359,70 @@ properties_claimed:
       crates/trigon-strategy/src/yarn.rs — `a_script_body_reaches_the_build_as_written_and_is_never_evaluated`;
       crates/trigon-registry/tests/infer.rs — `the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated`;
       crates/trigon-registry/tests/ci.rs — `what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated`
+- id: P47
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: trigon runs import
+  violation_symptoms:
+  - a file written outside the store's layout
+  - a link followed
+  - a blob stored under a name it does not hash to
+  - a record naming a blob the import did not write
+  - a statement or a record written over
+  statement: 'An import writes nothing it has not checked, and nothing no record names. trigon runs import
+    reads a regular file within Limits::total_expanded_bytes and never decompresses it: a compressed one
+    is refused. It is read with the tar reader artifacts are read with, under the same limits, and refused
+    whole unless every entry is a regular file — no link, directory or device, no PAX record but a long
+    nam'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/transfer.rs; crates/trigon-store/src/lib.rs — `is_statement_path`, `put_statement`,
+      `create_run`; tests `an_import_is_checked_whole_before_anything_is_written`, `a_statement_that_differs_where_the_run_names_it_refuses_the_import`,
+      `a_run_filed_here_after_the_import_looked_is_never_written_over`, `a_run_imported_is_created_and_never_written_over_another`,
+      `a_failed_import_leaves_no_record_naming_blobs_that_are_not_there`, `a_run_whose_statement_has_a_long_name_or_an_epoch_moves_whole`,
+      `a_statement_filed_where_its_run_names_it_is_never_written_over_another`, `every_path_a_statement_is_filed_at_is_one_an_import_files_it_at`
+- id: P48
+  kind: integrity
+  components:
+  - multiple
+  tier: security-critical
+  conditions: trigon publish of a verdict
+  violation_symptoms:
+  - a published verdict nobody can re-derive once no binary carries its set
+  - a record naming a module the repository does not hold, or holds as other bytes
+  statement: Every verdict trigon publish publishes names the stabilizer-set module that re-derives it,
+    and the repository holds that module. publish refuses, before anything is written, a verdict whose
+    statement signs no evidence.stabilizerSetModule, saying how to build and name one; it writes the module
+    attest kept in the store into evidence/sha256/… with the record's other evidence, one file however
+    many re
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.1, D9; docs/09-attestations.md §7.1; docs/16-findings.md
+      §3.109; crates/trigon/tests/publish.rs — `a_verdict_naming_no_module_is_refused_and_a_module_is_published_once`,
+      `a_verdict_under_a_set_the_verifier_lacks_re_derives_through_the_module_it_published`; crates/trigon/tests/seam_attest_refusals.rs
+      — `a_verdict_names_the_module_that_reproduced_it_and_the_store_keeps_its_bytes`
+- id: P49
+  kind: integrity
+  components:
+  - multiple
+  tier: security-critical
+  conditions: the checkpoint verified as P33 and P39–P41, or P44 under --remote, verify it
+  violation_symptoms:
+  - a line naming a checkpoint other than the one the answer came from, or a root spelled differently
+    in two reports
+  - a source that answers with no line
+  statement: Every report that answers from a source names the checkpoint it answered from, root included,
+    on one line that is the same in every report. trigon lookup, trigon check, both forms of verify-attestation,
+    evidence sync and evidence list print under each source checkpoint <origin> <size> <root>, the root
+    spelled as the checkpoint's note spells it, and carry it in JSON, and in check's SARIF, as checkp
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §8, D11; docs/16-findings.md §3.110; crates/trigon/tests/lookup.rs
+      — `every_report_prints_the_checkpoint_it_answered_from`, `remote_prints_the_checkpoint_it_fetched`,
+      `remote_answers_unknown_for_a_frozen_log`; crates/trigon/tests/evidence.rs — `sync_and_list_print_the_checkpoint_accepted`,
+      `a_key_change_and_a_succession_are_followed_on_sync`
 - id: P30
   kind: resource-bound
   components:
@@ -3507,11 +3652,13 @@ properties_disclaimed:
   conditions: wasm feature
   tier: security-critical
   false_friend: false
-  statement: That a normalized claim re-derived through an archived stabilizer set stays normalized. It
-    degrades to normalized_with_caveats, so a true claim reads as refuted
+  statement: 'That a normalized claim re-derived through an archived stabilizer set is shown to be normalized.
+    A module returns stabilized bytes and nothing about which passes fired, so equal stabilized forms
+    re-derive as normalized_with_caveats at most; verify-attestation reports the claim consistent — neither
+    held nor refuted — and exits 0, since §6''s 0 is a verdict at or above normalized_with_caveats, which '
   provenance:
-    kind: documented
-    source: docs/16-findings.md §4b
+    kind: maintainer
+    date: 2026-09
 - id: D19
   components:
   - multiple
@@ -3541,7 +3688,10 @@ properties_disclaimed:
   tier: security-critical
   false_friend: false
   statement: Resource or capability bounds on an archived stabilizer set beyond wasmtime's own sandbox.
-    The host sets no fuel limit, no epoch interruption and no memory limiter
+    The host sets no fuel limit, no epoch interruption and no memory limiter below the 4 GiB a wasm32
+    module can address; it makes an instance of the module for each artifact, so a module that loops never
+    returns, and one that exhausts its memory fails the re-derivation (P23). The full build runs a module
+    withou
   provenance:
     kind: documented
     source: docs/threat-model.md
@@ -3659,9 +3809,9 @@ properties_disclaimed:
   false_friend: false
   statement: 'That keys trusted on first use are the log''s. A source configured with trust_on_first_use,
     or by TRIGON_EVIDENCE_TOFU=1, pins a key it does not configure by reading the repository''s keys/
-    from the first location reached on its first sync: whoever serves that location then — the repository''s
-    operator, a thief of its push credential, or anyone between (A8, A9) — chooses the keys, and every
-    later syn'
+    from the first location reached that holds a log on its first sync: whoever serves that location then
+    — the repository''s operator, a thief of its push credential, or anyone between (A8, A9) — chooses
+    the keys, an'
   provenance:
     kind: documented
     source: docs/19-distribution-and-lookup.md §2.4, §6.1
@@ -3733,6 +3883,35 @@ properties_disclaimed:
     kind: documented
     source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.105; crates/trigon-api/src/publication.rs
       — `not_cold`; crates/trigon/src/main.rs — `image_pin`
+- id: D39
+  components:
+  - multiple
+  conditions: a verdict re-derived through its module
+  tier: security-critical
+  false_friend: false
+  statement: That the stabilizer-set module a verdict names is honest. Its sha256, signed into the verdict,
+    binds it to the signer's claim, and nothing else can be substituted for it; but a signer who signs
+    a false verdict can name a module that makes it re-derive — one that reports the right set digest
+    and stabilizes any two artifacts to what the verdict signs. attest checks a module against the native
+    set be
+  provenance:
+    kind: documented
+    source: docs/09-attestations.md §7.1
+- id: D40
+  components:
+  - operator-surface
+  conditions: trigon runs import
+  tier: security-critical
+  false_friend: false
+  statement: 'That an imported run was made where, when and how its record says. trigon runs import checks
+    the file (P47) and not the claims: each record keeps the host id, start time, cache state and image
+    pin the exporting machine wrote, and gains nothing about the importing one. The publication gate''s
+    same-host rule compares the host ids the records carry, so a record that names another machine counts
+    as one'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md D8; crates/trigon/src/transfer.rs; crates/trigon/tests/publish.rs
+      — `attempts_made_in_two_stores_and_imported_into_one_are_published_there`
 - id: D24
   components:
   - multiple
@@ -4040,6 +4219,17 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-18
   component: multiple
+  statement: 'Import runs only from machines you would let write to your store. trigon runs import checks
+    the file and takes each record''s claims as they came (P47, D40): a confirmation imported from a machine
+    you do not control is one you cannot vouch for, and the gate counts it all the same'
+  enforces:
+  - D40
+  - P47
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.13
+- id: dr-19
+  component: multiple
   statement: Two-party review for anything touching a stabilizer , a non-empty prose reason:, and the
     corpus-wide impact preview before merging. ---
   enforces: []
@@ -4101,7 +4291,15 @@ known_misuses:
 - id: km-8
   component: multiple
   pattern: Comparing verdicts across stabilizer sets
-  safer_alternative: compare refuses, and so should you. ---
+  safer_alternative: compare refuses, and so should you
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.14
+- id: km-9
+  component: multiple
+  pattern: Importing somebody else's export to confirm a run
+  safer_alternative: The gate counts the machine id an imported record names, whatever machine made it
+    (D40). Confirm on a machine you control. ---
   provenance:
     kind: documented
     source: docs/threat-model.md §1.14

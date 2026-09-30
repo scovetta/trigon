@@ -191,7 +191,9 @@ maintaining one whose shape is a guess. It arrives with M4.
 
       Shipped as a **core module** rather than a component, and an archived set can reach
       `NormalizedWithCaveats` but not `Normalized`, because the provenance cap cannot be confirmed
-      from bytes alone. Both are recorded in [`16-findings.md`](16-findings.md) §4b.
+      from bytes alone; a `Normalized` claim re-derived through one is reported *consistent*,
+      neither held nor refuted. Both are recorded in [`16-findings.md`](16-findings.md) §4b. Every
+      published verdict names its module, and `publish` puts it in `evidence/` (§3.109 there).
 
 ### M3. The AI subsystem (4 weeks)
 

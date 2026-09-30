@@ -379,6 +379,8 @@ code, identical or not. A `.nupkg` holding such an assembly reaches a clean verd
 serves one at `/-nuget/<moment>/`: a service index, a registration filtered by `published`, and a
 flat container whose version list is **derived** from that filtered registration rather than
 proxied, because upstream's own version list carries no dates and so cannot be filtered at all.
+Every URL in them carries the moment as the filter applied it, normalized as on every other route,
+so a transcript row names that moment and not the client's spelling of it.
 
 Four things this cost that were not obvious from the specification:
 
@@ -488,7 +490,8 @@ profiles — and all nine build and pack on Linux under `dotnet pack`:
   all nine.
 - **PCL profiles need reference assemblies that no NuGet package ships**, which is the one true part
   of the old claim. They are about a megabyte, in Mono's `referenceassemblies-pcl`, and
-  `trigon base-image --pcl-reference-assemblies` vendors them. `nuget/build/pack` then writes a
+  `trigon base-image --pcl-reference-assemblies` vendors them, from one `.deb` checked against the
+  SHA-256 Mono's signed apt index gives it before it is unpacked. `nuget/build/pack` then writes a
   `Directory.Build.props` wiring them up for `portable-*` targets only — never unconditionally,
   because `net20`-`net48` get theirs through the same property and an unguarded override breaks
   the four targets that work for free.

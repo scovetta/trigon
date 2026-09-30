@@ -198,14 +198,16 @@ verdict.
 
 ### 2.2 `equivalence/v1`
 
-The load-bearing one.
+The load-bearing one. What `trigon verify --attest` signs about two local files, with every field it
+writes; the pass ids and the set digest are the ones [`stabilizers.md`](stabilizers.md) lists, and
+the digests of the artifacts are shortened here.
 
 ```json
 {
   "_type": "https://in-toto.io/Statement/v1",
   "subject": [
     { "name": "left-pad-1.3.0.tgz",
-      "digest": { "sha1": "5b8a3a77…", "sha256": "e9f1a3b0…", "sha512": "5c8e4c3f…" } }
+      "digest": { "sha256": "e9f1a3b0…", "sha512": "5c8e4c3f…" } }
   ],
   "predicateType": "https://trigon.dev/equivalence/v1",
   "predicate": {
@@ -213,45 +215,51 @@ The load-bearing one.
     "containerBitIdentical": false,
     "archiveFormat": "tar+gzip",
     "artifacts": {
-      "upstream": { "sha256": "e9f1a3b0…", "sha512": "…", "bytes": 2412 },
-      "rebuild":  { "sha256": "b1946ac9…", "sha512": "…", "bytes": 2455 }
+      "upstream": { "sha256": "e9f1a3b0…", "sha512": "5c8e4c3f…", "bytes": 2412 },
+      "rebuild":  { "sha256": "b1946ac9…", "sha512": "0a7d31e2…", "bytes": 2455 }
     },
     "container": {
       "upstream": { "sha256": "1f0c2d44…" },
-      "rebuild":  { "sha256": "1f0c2d44…" }
+      "rebuild":  { "sha256": "6b3e90a7…" }
     },
     "stabilized": {
       "upstream": { "sha256": "7d865e95…" },
       "rebuild":  { "sha256": "7d865e95…" }
     },
     "stabilizerSet": {
-      "id": "npm-tarball",
-      "digest": { "sha256": "2b7c4f…" },
-      "members": [
-        "tar-entry-order", "tar-time", "tar-mode", "tar-owners", "tar-xattrs", "tar-device",
-        "gzip-compression", "gzip-name", "gzip-time", "gzip-misc",
-        "npm-prefix", "npm-install-fields"
-      ]
+      "id": "tar-gzip",
+      "digest": { "sha256": "cadb3a863443a703bcfb7bd35e08581cee2a2d54c78b661bd2c43e483120bdbb" }
     },
     "applied": [
-      { "id": "tar-time",           "risk": "metadata",   "provenance": "builtin",
-        "entriesTouched": 41, "bytesChanged": 0 },
-      { "id": "gzip-compression",   "risk": "structural", "provenance": "builtin",
-        "entriesTouched": 0,  "bytesChanged": 0 },
-      { "id": "npm-install-fields", "risk": "metadata",   "provenance": "builtin",
-        "entriesTouched": 1,  "bytesChanged": 78 }
+      { "id": "gzip-meta-v2",       "side": "upstream", "risk": "metadata",
+        "provenance": "builtin", "entriesTouched": 1, "bytesChanged": 0 },
+      { "id": "tar-entry-order-v2", "side": "upstream", "risk": "structural",
+        "provenance": "builtin", "entriesTouched": 41, "bytesChanged": 0 },
+      { "id": "tar-time",           "side": "upstream", "risk": "metadata",
+        "provenance": "builtin", "entriesTouched": 41, "bytesChanged": 0 },
+      { "id": "gzip-meta-v2",       "side": "rebuild",  "risk": "metadata",
+        "provenance": "builtin", "entriesTouched": 1, "bytesChanged": 0 },
+      { "id": "tar-owners",         "side": "rebuild",  "risk": "metadata",
+        "provenance": "builtin", "entriesTouched": 41, "bytesChanged": 0 },
+      { "id": "tar-time",           "side": "rebuild",  "risk": "metadata",
+        "provenance": "builtin", "entriesTouched": 41, "bytesChanged": 0 }
     ],
-    "provenanceCap": {
-      "applied": true,
-      "maxRiskApplied": "metadata",
-      "allBuiltin": true
-    },
-    "comparator": { "digest": { "sha256": "8e1f…" } },
-    "diffReport": { "sha256": "0000…" },
-    "rebuildAttestation": { "sha256": "<digest of the rebuild/v1 statement>" }
+    "provenanceCap": { "allBuiltin": true, "maxRiskApplied": "metadata" },
+    "members": { "identical": 41, "differs": 0, "onlyUpstream": 0, "onlyRebuild": 0,
+                 "executableDiffers": 0 }
   }
 }
 ```
+
+An npm package is a `.tgz`, and every one is compared under `tar-gzip`, whose seven passes are
+`gzip-meta-v2`, `tar-device`, `tar-entry-order-v2`, `tar-mode`, `tar-owners`, `tar-time` and
+`tar-xattrs`: nothing selects `npm-tarball`, which adds `npm-install-fields-v2`
+([`stabilizers.md`](stabilizers.md) §1.1). The set is named by id and digest, and its members are
+in its manifest, which a v2 verdict names as evidence (§2.5). `applied` names each pass that changed
+something, on the side it changed, so the two sides routinely differ. Every pass here is
+`structural` or `metadata`, the two tiers below `content`, which leave `normalized` reachable
+([`stabilizers.md`](stabilizers.md) §1.4), so the outcome is `normalized`, and `maxRiskApplied` is
+the higher of the two, `metadata`.
 
 `outcome` is a **string** rather than an ordinal. `provenanceCap` states the invariant from
 [`00-overview.md`](00-overview.md) §3.1 outright, so a consumer never re-derives it from `applied`.
@@ -341,7 +349,7 @@ anything else `equivalence/v2`.
   "predicateType": "https://trigon.dev/equivalence/v2",
   "predicate": {
     "outcome": "normalized",
-    "stabilizerSet": { "id": "tar-gzip", "digest": { "sha256": "4598411b…" } },
+    "stabilizerSet": { "id": "tar-gzip", "digest": { "sha256": "cadb3a86…" } },
     "…": "every v1 field, unchanged",
     "purl": "pkg:npm/left-pad@1.3.0",
     "purlCanon": 1,
@@ -353,6 +361,7 @@ anything else `equivalence/v2`.
     "derivation": { "method": "heuristic" },
     "evidence": {
       "stabilizerSetManifest": { "sha256": "51d0…" },
+      "stabilizerSetModule": { "sha256": "9e04…" },
       "comparison": { "sha256": "3d88…" },
       "strategy": { "sha256": "b02f…" },
       "guardManifest": { "sha256": "e5c9…" },
@@ -380,6 +389,7 @@ anything else `equivalence/v2`.
 | `falsifyingCommand.argv` | the command that would falsify this verdict | only when `[publish] origin` and `disputes` are both set | 6 |
 | `disputePointer` | `{"kind": "url", "url": …}`, where a dispute goes | as `falsifyingCommand` | 6 |
 | `evidence.stabilizerSetManifest` | sha256 of the set manifest's canonical JSON — a file, and not the set digest, which hashes the manifest's rows | always | 7 |
+| `evidence.stabilizerSetModule` | the stabilizer set as a WebAssembly module, which re-derives the verdict after binaries stop carrying the set (§7.1) | where `attest` was given a module and it reproduced the run; `publish` refuses a verdict without it | 7 |
 | `evidence.comparison` | the comparison report the run stored | always | 7 |
 | `evidence.rebuiltArtifact` | the rebuilt artifact | always | 7 |
 | `evidence.strategy` | the strategy blob (`RunRecord.strategy`), fetched and recomputed before it is signed | where the run stored its strategy | 7 |
@@ -404,7 +414,9 @@ repository, and `publish` refuses it.
 
 **Every evidence digest names a blob the attestor read.** The set manifest is written to the store
 as a blob of its canonical JSON (`trigon_attest::set_manifest_file`) when the verdict is signed, so
-its digest names bytes a record can carry; the strategy is fetched by hash and its `strategyDigest`
+its digest names bytes a record can carry; the stabilizer-set module is written to the store as the
+bytes `attest` ran, once they have reported the run's set digest and stabilized both artifacts to
+the digests the run recorded (§7.1); the strategy is fetched by hash and its `strategyDigest`
 recomputed; a guard manifest the store does not hold, which is every run recorded before manifests
 were kept, is left out of `evidence` and the attestor says so, while `buildobservation` still names
 its digest for what the guard was armed with. The names are shared with the record file's `evidence`
@@ -525,7 +537,8 @@ One published result, as [`19`](19-distribution-and-lookup.md) §4.1 lays it out
   "subject": { "purl": "pkg:npm/left-pad@1.3.0",
                "digests": { "sha512": "1df6…", "sha1": "0e7c…", "sha256": "8b2e…" } },
   "statements": [ "…the verdict, void or withdrawal envelope, then rebuild and buildobservation…" ],
-  "evidence": { "stabilizerSetManifest": "sha256:51d0…", "comparison": "sha256:3d88…" }
+  "evidence": { "stabilizerSetManifest": "sha256:51d0…", "stabilizerSetModule": "sha256:9e04…",
+                "comparison": "sha256:3d88…" }
 }
 ```
 
@@ -680,7 +693,7 @@ first four hex characters of the name, everywhere, and every digest is whole.
 | What | Path |
 |---|---|
 | a record file, by the sha256 of its bytes | `records/<aa>/<bb>/<hex>.json` |
-| an evidence file, by the sha256 of its bytes | `evidence/sha256/<aa>/<bb>/<hex>` |
+| an evidence file, by the sha256 of its bytes — a stabilizer-set module among them | `evidence/sha256/<aa>/<bb>/<hex>` |
 | the index, by a subject digest | `index/sha256/…/<64 hex>.json`, `index/sha512/…/<128 hex>.json`, `index/sha1/…/<40 hex>.json` |
 | the index, by purl | `index/purl<n>/<aa>/<bb>/<sha256 of the canonical purl>.json` |
 | the index, by package | `index/pkg<n>/<aa>/<bb>/<sha256 of the versionless form>.json` |
@@ -923,7 +936,8 @@ As built:
 
 ```
 blobs/sha256/<aa>/<digest>                         artifacts, comparisons, logs, transcripts,
-                                                   strategies and guard manifests
+                                                   strategies, guard manifests, set manifests
+                                                   and stabilizer-set modules
 attestations/<eco>/<pkg>/<ver>/<artifact>/<run-id>/<predicate>.intoto.json   one DSSE envelope
 runs/<run-id>.json                                 the run record, naming its blobs by digest
 stabilizers/sha256/<set-digest>.json               each set a claim was made under, as a manifest
@@ -1154,9 +1168,12 @@ Steps:
    members; every member, with its status, kind, digests and sizes; and the field edits, where it
    carries any. Its progression and notes are explanation a later build may word differently, and
    the members' raw paths are missing from a report written before they were kept, so those are
-   reported unchecked, and so are field edits a report does not carry. Through an archived set
-   (§7.1), which returns stabilized bytes and no report, those three fields and the report are
-   reported unchecked.
+   reported unchecked, and so are field edits a report does not carry. Where this binary does not
+   carry the set the statement names, the claim is re-derived through the stabilizer-set module the
+   record carries, held to the digest the verdict signs, or through `--stabilizers <module.wasm>`,
+   which is run whatever the binary carries (§7.1). A module returns stabilized bytes and no report,
+   so those three fields and the report are reported unchecked, and a `normalized` claim whose
+   stabilized forms re-derive equal is *consistent*, the third answer, and not refuted.
 
 A record is shown as [`19`](19-distribution-and-lookup.md) §4.2 has every client show one: with its
 outcome, its set's id and digest, its run and when it ran, the Trigon that built it and the one that
@@ -1172,10 +1189,12 @@ an artifact withdrawn, 3 for a void or a lower verdict, 4 for a record, a log or
 that failed verification — an equivocation and a deleted record among them — or a source whose log
 continues where the directory does not reach, and 5 when it could not check at all: bad arguments,
 those `clap` refuses included, an unreadable input, a checkpoint or state file that is not a
-checkpoint, a source not configured, a set this build does not carry, or the wrong artifact given to
-`--rerun-comparison`. `--rerun-comparison`'s arguments are checked before the record, so a bad one
-exits 5 whatever the record is. Of several, the first in the order 5, 4, 1, 3, 2 wins. `--output
-json` prints the report with its exit code, and, where the check stops before a record is read, the
+checkpoint, a source not configured, a set this build does not carry and no module to run for it,
+a module the directory does not hold, the wrong artifact or a module other than the one the verdict
+signs given to `--rerun-comparison`, or a verifier build asked to run a module.
+`--rerun-comparison`'s arguments are checked before the record, so a bad one exits 5 whatever the
+record is. Of several, the first in the order 5, 4, 1, 3, 2 wins. `--output json` prints the report
+with its exit code, and, where the check stops before a record is read, the
 exit code, what stopped it and why, with both signed notes of an equivocation or a rollback; only an
 argument `clap` refuses, which stops it before `--output` is read, prints `clap`'s message alone. A
 signature that does not verify, a claim that does not re-derive and a log that fails are reported as
@@ -1208,35 +1227,133 @@ ran, and a 2029 binary carrying 2029 stabilizers cannot reproduce a 2026 digest.
 every stabilizer version permanently" names a requirement without naming a mechanism, so here is the
 mechanism.
 
-**Stabilizer sets ship as content-addressed WASM modules.** A set is a manifest of member ids plus
-the digest of one `stabilizers.wasm` component that implements them. We publish that component
-alongside the attestation bundle and mirror it into the same object store:
+**Every published verdict names its stabilizer set as a WebAssembly module**, and the module is
+published beside it. `crates/trigon-stabilize-wasm` compiles the stabilizers of one checkout, every
+profile in it, into a core module for `wasm32-unknown-unknown` (a component was the plan; the core
+module and why are in [`16-findings.md`](16-findings.md) §4b). The module is pure: it imports
+nothing, so it has no clock, network, filesystem or WASI, and a module that declares an import is
+refused when it is loaded. Its ABI is three functions over its exported memory: allocate a buffer,
+stabilize, and report the set digest a profile has; a fourth, appended since, names the commit the
+module was built from. `scripts/build-set-module.sh` builds it and prints its path, its sha256 and
+that commit.
+
+**`trigon attest` names it only once it has reproduced the claim.** The module comes from
+`--stabilizer-module <file>` or `[publish] stabilizer_module` in `evidence.toml`, and the flag wins.
+Before anything is signed, `attest` loads it from the bytes it read and hashed, and refuses to sign
+unless the module reports the run's set digest for the run's profile and stabilizes both stored
+artifacts to exactly the stabilized digests the run recorded, which `attest` has just re-derived
+natively. So the module is proved against the set compiled into the binary while that set still
+exists to compare with. `attest` then keeps the module in the store as a blob and signs its sha256
+into the verdict as `evidence.stabilizerSetModule` (§2.5). The record's unsigned evidence map names
+it too, and a record whose map and statement disagree fails verification (§7 step 3). A void and a
+withdrawal name no module. `attest` also prints the commit the module names beside the commit it
+was built from itself, and says so where the module names none, or was built from changes no commit
+has, which nobody can rebuild from a commit (below). Without a module, `attest` signs as before and
+says so, and `trigon publish`
+refuses the verdict: a published verdict must stay re-derivable after binaries stop carrying its
+set. `publish` copies the module into `evidence/sha256/<aa>/<bb>/<hex>` with the rest of the
+evidence, one file however many records name it.
+
+**`verify-attestation --rerun-comparison` runs the module where it has to.** Where the binary
+carries the set the statement names, the claim is re-derived natively, as before. Where it does
+not, the record form and `--lookup` read the module the record's evidence carries, hold its bytes to
+the signed digest, and run it under `wasmtime`. A module the directory does not hold is a check not
+made, exit 5, and the output says where to fetch it. `--stabilizers <module.wasm>` runs the module
+it names whether or not the binary carries the set, which is how a verifier checks a module while a
+binary can still be compared with it, and it is held to the signed digest too where the verdict
+signs one. A statement that signs none, a v1 bundle or a verdict signed before modules were, binds
+none: a module given for it is run, held only to the set digest it reports of itself and to the
+stabilized digests the statement signs, and the output says so. A bundle carries no
+evidence, so for a bundle under a set this binary does not carry the module comes from
+`--stabilizers`. A module whose sha256 is not the one the verdict signs is refused before it runs:
+for a record, exit 5, since it is the wrong file and not a refuted claim; the bundle form exits 1
+for it, as for anything that stops it. The `wasm` host is part of the full
+build and not of the verifier (`--no-default-features`), which stays without `wasmtime` unless
+built `--features wasm`; a verifier build that meets a verdict under a set it does not carry says
+to build it that way, or to use the full build.
+
+**The signed digest is what makes a module worth running.** The set digest a module reports is the
+module's own word, and any module can return any 32 bytes, so a module built to make a false claim
+hold could report the right digest and stabilize any two artifacts to whatever the statement signs.
+The module still has to report the set the statement names, which catches the wrong module. What
+binds it to the claim is its sha256 in the signed verdict: it is the code the signer named, and no
+one else can substitute another. A verifier who does not trust the signer's module rebuilds it from
+source and compares digests (below). A module that made a false claim hold would be the signer's own
+signed lie, logged for good, and anyone who rebuilds the module can show it.
+
+**What a module re-derives.** Stabilized bytes, and nothing about which passes fired. So the
+outcome and both stabilized digests are re-derived, and `differences`, `applied`, `members` and the
+published comparison report are reported unchecked. Equal stabilized forms of different bytes
+re-derive as `normalized_with_caveats` at most, because the provenance cap needs each applied pass's
+tier and provenance. A `normalized` claim re-derived that way is neither held nor refuted, and
+`verify-attestation` gives it a third answer:
 
 ```
-stabilizers/sha256/<set-digest>.wasm        the component
-stabilizers/sha256/<set-digest>.json        member ids, risk tiers, provenance, build provenance
+rederived normalized_with_caveats under tar-gzip@cadb3a863443, and the statement claims
+          normalized — consistent: the stabilized forms are equal, as the claim says; an archived
+          set cannot show which tier of pass fired, so the claim's strength is not re-derived
 ```
 
-`trigon verify-attestation --rerun-comparison` reads the set digest from the attestation, fetches the
-matching component (or takes `--stabilizers ./set.wasm` for an offline verifier), instantiates it
-under `wasmtime`, and runs the comparison through it. The component is pure, total, and has no
-network or filesystem access, which is what made stabilizers the right first WASM guest in the first
-place ([`01-architecture.md`](01-architecture.md) §4).
+`--output json` says `"holds": false, "consistent": true`. The re-derived outcome is never promoted
+to `normalized`. A consistent claim exits 0, for a bundle and for a record, as a claim that holds
+does. [`19`](19-distribution-and-lookup.md) §6's 0 is "a verdict at or above
+`normalized_with_caveats`", and the module re-derives exactly that, so 0 is true whichever tier the
+claim has. 1 for a bundle and 4 for a record would say the claim is false, which nothing re-derived
+shows. A code of its own would give a sixth meaning to a table that CI reads by the order 5, 4, 1,
+3, 2. Every other difference between the claimed and the re-derived outcome is one the digests
+decide, and is refuted as before.
+
+**Reproducing the module.** Two builds of one commit give the same bytes, wherever the checkout is
+and whoever builds it. The release profile keeps debug information (`debug = 1`), and the compiler
+embeds source paths for panic messages, so a plain `cargo build` of the module carries the path of
+the checkout and of cargo's registry and differs from one machine to the next. The script builds
+without debug information, strips it, rewrites both paths with `--remap-path-prefix`, sets
+`CARGO_ENCODED_RUSTFLAGS` outright so nothing in the environment or a cargo configuration adds flags
+and a path with a space in it stays one flag, and builds `--locked` with the toolchain
+`rust-toolchain.toml` pins.
+
+**The module names the commit it was built from** (`trigon_source_commit`): `git rev-parse HEAD`
+where the script ran, with `.dirty` after it where the tree had changes the commit does not, as the
+binary's own version does, and none outside a git checkout or from a plain `cargo build`.
+`verify-attestation` prints it on the module line of every re-derivation through a module. It is
+the module's own word, like the set digest it reports, and it is carried by the bytes whose sha256
+the verdict signs. It says where to start; rebuilding from it and comparing digests is the check,
+and a module that named another commit than its own fails exactly that. To check a module a verdict
+names:
+
+```
+git checkout <commit>                       # the one the module names
+rustup target add wasm32-unknown-unknown
+scripts/build-set-module.sh                 # prints the module's path, its sha256 and its commit
+```
+
+and compare the sha256 with the verdict's `evidence.stabilizerSetModule`. A module built from a
+dirty tree cannot be reproduced this way, which is why `attest` says so when it names one.
+
+**How large an artifact a module can stabilize.** A `wasm32` module addresses at most 4 GiB, and
+stabilizing holds the artifact, its expansion and the stabilized form together, each in a buffer
+that grows by doubling. Measured with the module this checkout builds, one artifact that expands to
+496 MiB stabilizes and one that expands to 512 MiB does not, compressible or not; the native set
+takes up to 4 GiB (`Limits::total_expanded_bytes`). Each artifact is stabilized in an instance of
+the module made for it, so the two sides of a comparison do not share that space: in one instance,
+a pair of incompressible artifacts failed past 384 MiB. Past the limit the module fails, `attest`
+refuses to name it, and `publish` refuses the verdict, so an artifact that expands to 512 MiB or
+more cannot be published until stabilizing it takes less memory
+([`16-findings.md`](16-findings.md) §3.109).
 
 Three consequences to accept with open eyes:
 
-- **The WASM host moves from v2 to v1**, at least for the verifier. `trigon verify` links `wasmtime`;
-  the fleet keeps running native stabilizers compiled from the same source, and a CI test asserts the
-  two produce identical digests over the M0 corpus.
-- **The component is itself attested**, built reproducibly from a tagged commit, so a verifier can
-  check that the code they fetched matches the source they can read.
-- **A verifier who declines to run our WASM** can rebuild the component from that tagged commit, or
-  fall back to `--stabilizers` with their own build. Neither path requires trusting the binary we
+- **The WASM host is in the full build.** `wasmtime` roughly doubles the dependency tree, so the
+  verifier build leaves it out unless asked. The fleet keeps running native stabilizers compiled
+  from the same source, and `crates/trigon-stabilize-wasm/tests/parity.rs`, which CI runs, asserts
+  that the module and the native build report the same set digest for every profile and produce
+  identical bytes over its cases.
+- **A module is named only after it has reproduced its claim.** A verifier who receives a module
+  from a record runs code that the signer vouched for by digest and that `attest` checked against
+  the native set.
+- **A verifier who declines to run our WASM** can rebuild the module from the commit, or pass
+  `--stabilizers` with their own build of it. Neither path requires trusting the binary we
   published.
-
-The fallback, if the WASM host proves impractical, is to name a `trigon` release version in every
-attestation and require that release to verify. It works, it keeps every historical binary alive
-forever, and it is the option we take only if §7.1 fails.
 
 ## 8. Bundle format
 

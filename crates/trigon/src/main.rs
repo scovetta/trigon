@@ -174,7 +174,9 @@ enum Cmd {
     /// accepted; the record's leaf, signature, statement and evidence; and what the source says of
     /// its artifact now, supersessions applied. The source's keys and checkpoint come from
     /// `--source <name>`, or from `--log-vkey`, `--attestation-key` and `--checkpoint`. No network
-    /// in either form. It exits 0 for a verdict at or above `normalized_with_caveats`, 1 for a
+    /// in either form. Under the source it prints the checkpoint the log was read at, `checkpoint
+    /// <origin> <size> <root>`, as `lookup` and `check` do, a line to compare with another user's
+    /// for the same log. It exits 0 for a verdict at or above `normalized_with_caveats`, 1 for a
     /// divergence, 2 for a withdrawn artifact, 3 for a void or a lower verdict, 4 for a record,
     /// log or claim that failed verification or a log that continues where `<dir>` does not
     /// reach, and 5 when it could not check at all, bad arguments included.
@@ -251,8 +253,14 @@ enum Cmd {
         ///
         /// A manifest says what the set *was*, which turns "these digests disagree" from a dead end
         /// into something a person can act on. A module lets the claim be **checked** under the set
-        /// it was actually made under, which is what archiving stabilizer sets was always for. The
-        /// module path needs this binary built with `--features wasm`.
+        /// it was actually made under, which is what archiving stabilizer sets was always for. A
+        /// module given is run whether or not this binary carries the set, and only when its
+        /// sha256 is the `stabilizerSetModule` the statement signs, where it signs one. Without
+        /// it, a record's own module is run where this binary does not carry the verdict's set.
+        /// Either way the output names the commit the module says it was built from. A
+        /// `normalized` claim re-derived through a module is consistent, neither held nor refuted,
+        /// and exits 0. The module path needs this binary built with `--features wasm`, which the
+        /// full build is.
         #[arg(long)]
         stabilizers: Option<PathBuf>,
         /// Check a bundle's signature against this ed25519 public key, given as hex.
@@ -392,7 +400,8 @@ enum Cmd {
         /// its result here: `equivalence/v2` or `divergence/v2` for a verdict, `void/v1` for a run
         /// the publication gate calls void, and never a verdict for one. Needs `--store`, where
         /// the run is recorded and every statement is filed under it, as `trigon attest` files
-        /// them.
+        /// them. A verdict names the stabilizer-set module `[publish] stabilizer_module` names,
+        /// held to the run first, as `trigon attest` names it.
         ///
         /// The same code as `trigon attest`, run in the process that ran the build. `--store` and
         /// then `trigon attest` keeps signing out of that process, which is the separation
@@ -494,7 +503,9 @@ enum Cmd {
     /// somebody wrote applied — is signed as `void/v1` and nothing else, never as a verdict. Any
     /// other run gets `equivalence/v2` or `divergence/v2`, with `rebuild/v1` and
     /// `buildobservation/v1` beside it. `[publish] origin` and `disputes` in `evidence.toml`, when
-    /// both are set, are signed into the verdict's falsifying command and dispute pointer.
+    /// both are set, are signed into the verdict's falsifying command and dispute pointer, and the
+    /// stabilizer-set module `--stabilizer-module` or `[publish] stabilizer_module` names into its
+    /// evidence, once it has reproduced the run's stabilized digests.
     #[cfg(feature = "build")]
     Attest {
         /// The store the run was written to, and where a withdrawal is filed.
@@ -538,6 +549,17 @@ enum Cmd {
             )
         )]
         reason: Option<String>,
+        /// The stabilizer-set module to name in the verdict, as `scripts/build-set-module.sh`
+        /// builds it: wins over `[publish] stabilizer_module`.
+        ///
+        /// Run before anything is signed, and refused unless it reports the run's set digest and
+        /// stabilizes both stored artifacts to exactly the digests the run recorded. Then kept in
+        /// the store and signed into the verdict's evidence as `stabilizerSetModule`, so the
+        /// verdict stays re-derivable after a binary stops carrying its set. The commit the module
+        /// says it was built from is printed beside this Trigon's. `trigon publish` refuses a
+        /// verdict that names none. A void names none.
+        #[arg(long, value_name = "FILE", conflicts_with = "withdraw")]
+        stabilizer_module: Option<PathBuf>,
     },
     /// Publish to the evidence repository: runs the publication gate releases, a withdrawal, or a
     /// heartbeat, each as one commit (`docs/19` §3, §10 phase 5).
@@ -547,6 +569,8 @@ enum Cmd {
     /// the kill-switch read from the repository; publishes a run the gate calls void only as
     /// `void/v1`, and a withheld run not at all; refuses divergences while `[publish] divergences`
     /// is "refuse", and publishes each with its entry in `feed/divergences.atom` under "feed";
+    /// refuses a verdict that names no stabilizer-set module, and copies the module one names into
+    /// `evidence/` with the rest of its evidence, once however many records name it;
     /// uploads each verdict's rebuilt artifact as a release asset first where `rebuilt_artifacts =
     /// "github-release"`, with a token from GITHUB_TOKEN or GH_TOKEN; has `trigon log sign`, a
     /// child process that holds the log key, sign the new checkpoint; and pushes one commit, never
@@ -629,8 +653,9 @@ enum Cmd {
     /// `evidence.toml`, `TRIGON_EVIDENCE_REPO`): every stale source is synced once, and every
     /// package is then answered from the clones with no further request. It no longer reads
     /// `./trigon-store`; `--store <path>` does what it did, and none of the evidence flags go with
-    /// it. Each source's answer is reported beside its name, and sources that disagree are said
-    /// to.
+    /// it. Each source's answer is reported beside its name and the checkpoint it answered from,
+    /// `checkpoint <origin> <size> <root>`, a line to compare with another user's for the same
+    /// log; sources that disagree are said to.
     ///
     /// Exits 0 when every package is at or above the threshold, 1 for any divergence, 2 for any
     /// package never checked or withdrawn, 3 for any void or result below the threshold, 4 for any
@@ -691,8 +716,9 @@ enum Cmd {
     /// `sha1:<hex>`, a purl with its version or without it for every version, or a file, whose
     /// digests are computed. It is resolved from the verified leaves of each source's log, never
     /// from `index/`, with every supersession applied; a stale source is synced first, and said
-    /// to be. Each source answers for itself, and sources that disagree are said to. Exits as
-    /// `trigon check` does.
+    /// to be. Each source answers for itself, under the checkpoint it answered from, `checkpoint
+    /// <origin> <size> <root>`, a line to compare with another user's for the same log; sources
+    /// that disagree are said to. Exits as `trigon check` does.
     #[cfg(feature = "build")]
     Lookup {
         /// The artifact or package: a digest, an integrity string, a purl, or a file.
@@ -711,11 +737,15 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
-    /// List the runs a store holds.
+    /// List the runs a store holds; or, with `export` and `import`, move runs between stores, so
+    /// two machines can confirm each other without sharing one.
     #[cfg(feature = "build")]
+    #[command(args_conflicts_with_subcommands = true)]
     Runs {
         #[arg(long, default_value = "./trigon-store")]
         store: PathBuf,
+        #[command(subcommand)]
+        action: Option<RunsCmd>,
     },
     /// Fill in how a stored run was normalized: per-field attribution and the pass-by-pass
     /// progression, for runs judged before either was recorded.
@@ -769,7 +799,8 @@ enum Cmd {
         /// the .NET Framework targets need nothing at all, and only PCL needs this.
         ///
         /// Off by default because it is a network fetch from outside the distribution's archive,
-        /// and most images will never build a PCL target.
+        /// and most images will never build a PCL target. The file is pinned by the SHA-256 Mono's
+        /// signed index gives it, and a download of other bytes fails the image build.
         #[arg(long)]
         pcl_reference_assemblies: bool,
         #[arg(long, default_value = "localhost/trigon-base:latest")]
@@ -823,6 +854,10 @@ enum Cmd {
     /// One data point is an anecdote. This is what turns a working pipeline into a number, and the
     /// number is only meaningful because outcomes are separated: a package that does not reproduce
     /// and a build our own infrastructure could not run are different findings.
+    ///
+    /// Exits 0 when nothing stopped it, whatever the rows say. Exits 3 when it stopped early, at a
+    /// wall (`--wall`) or for too little memory or disk, after printing its summary: every row so
+    /// far is written, and the same command resumes it. Exits 1 when it could not run at all.
     #[cfg(feature = "build")]
     Sweep {
         /// A file of package URLs, one per line. `#` comments and blank lines are skipped.
@@ -884,7 +919,8 @@ enum Cmd {
         /// finding: most of what is published declares no repository. The first sweep of
         /// `corpora/random-125.txt` stopped after ten targets for exactly that reason.
         ///
-        /// `0` turns it off, for a corpus whose answer is expected to be homogeneous.
+        /// `0` turns it off, for a corpus whose answer is expected to be homogeneous. A sweep the
+        /// wall stops exits 3, not 0, so a scheduler can tell it from a finished one.
         #[arg(long, default_value_t = 10)]
         wall: u32,
     },
@@ -1311,6 +1347,52 @@ enum LogCmd {
     },
 }
 
+/// `trigon runs export` and `trigon runs import`.
+#[cfg(feature = "build")]
+#[derive(Subcommand, Debug)]
+enum RunsCmd {
+    /// Write runs, and every file they name, to one file another store can import.
+    ///
+    /// Each run's record goes in with every file it names that `attest`, `publish` and `rebuild
+    /// --confirm` read: its kept artifacts, its comparison, strategy, build log, model exchange and
+    /// network transcript, its guard manifest, its statements and the evidence they sign, and its
+    /// stabilizer set's manifest. The file is an uncompressed tar, and the same runs give the same
+    /// bytes. A run that names a file the store has lost is refused, and nothing is written.
+    Export {
+        /// Runs to export, by id.
+        #[arg(required = true)]
+        runs: Vec<String>,
+        /// The store the runs are in.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// The file to write. One already there is replaced.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Read a file `trigon runs export` wrote into this store, once all of it is checked.
+    ///
+    /// The file is untrusted, and nothing is written until every blob hashes to its name, every
+    /// record parses and every file it names is carried, every entry is a regular file at a path an
+    /// export writes, with no link and no `..`, and the whole is within the size an artifact may
+    /// expand to; a compressed file is refused, never decompressed. The blobs are written first
+    /// and each record last. A run already here as the file has it is left alone; one here that
+    /// differs is refused, and so is a statement at a path that holds another. Neither is ever
+    /// written over, one filed here while the import runs included.
+    ///
+    /// Each record keeps what it says — the machine that made the run, when it began, what it
+    /// could reuse, how its base image was pinned — and gains nothing about this machine. The
+    /// publication gate's same-host rule compares those recorded machine ids, and `rebuild
+    /// --confirm` of an imported run repeats the strategy, base image and egress tier it names, so
+    /// importing a run trusts whoever made it as far as sharing a store with them would.
+    Import {
+        /// The file `trigon runs export` wrote.
+        file: PathBuf,
+        /// The store to import into, made if it is not there.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+    },
+}
+
 /// `trigon evidence …`.
 #[cfg(feature = "build")]
 #[derive(Subcommand, Debug)]
@@ -1347,8 +1429,9 @@ enum EvidenceCmd {
         trust_on_first_use: bool,
     },
     /// Show every source: its origin, locations, whether it is required, which file added it,
-    /// what its last sync found, and how it stands now — fresh, stale, frozen or refused — with
-    /// its clones verified as a command asking it would verify them. Touches no network.
+    /// what its last sync found, the checkpoint it answers from, and how it stands now — fresh,
+    /// stale, frozen or refused — with its clones verified as a command asking it would verify
+    /// them. Touches no network.
     List {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
@@ -1357,12 +1440,14 @@ enum EvidenceCmd {
     /// project's `.trigon/evidence.toml` or TRIGON_EVIDENCE_REPO added is refused, saying why.
     Remove { name: String },
     /// Clone or fetch every location of every source, in parallel, and verify each whole before
-    /// anything from it is accepted.
+    /// anything from it is accepted, printing the checkpoint accepted as every report prints it.
     ///
     /// Exits 0 when every source synced, and 4 when any did not: refused, because it failed
     /// verification — a checkpoint that does not extend the one accepted, a rollback, mirrors that
     /// disagree, printed with both signed notes — or lost its state; or not reached, when it still
-    /// answers from its clone until it is stale.
+    /// answers from its clone until it is stale. A location serving a repository with no log at
+    /// all, as a mistyped URL does, is one not reached: set aside with a note naming it, the others
+    /// answering.
     Sync {
         /// Sync only this source; may be given more than once.
         #[arg(long = "source", value_name = "NAME")]
@@ -1621,6 +1706,9 @@ mod worker;
 mod check;
 #[cfg(feature = "build")]
 mod rederive;
+/// `trigon runs export` and `import`: runs moved between stores.
+#[cfg(feature = "build")]
+mod transfer;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
@@ -1785,7 +1873,7 @@ fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
                     it says is trusted";
         }
         // Not a published artifact, which is what `Upstream` says below.
-        Some(LogError::Malformed(_) | LogError::Missing { .. }) => {
+        Some(LogError::Malformed(_) | LogError::NoLog(_) | LogError::Missing { .. }) => {
             return "the evidence source's: its log could not be read";
         }
         _ => {}
@@ -1844,6 +1932,10 @@ mod fault_report {
             path: "log/checkpoint".into(),
         };
         let said = whose(missing.fault(), &anyhow::Error::new(missing));
+        assert_eq!(said, "the evidence source's: its log could not be read");
+        // So is a repository with no log at all: a mistyped URL is not a source lying.
+        let none = LogError::NoLog("there is no log in x".into());
+        let said = whose(none.fault(), &anyhow::Error::new(none));
         assert_eq!(said, "the evidence source's: its log could not be read");
         // Anything else that is a bug is still reported as one.
         let e = anyhow::Error::new(trigon_attest::AttestError::Canonicalize("x".into()));
@@ -2461,6 +2553,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             supersedes,
             withdraw,
             reason,
+            stabilizer_module,
         } => attestor::run(attestor::Args {
             store,
             run,
@@ -2470,6 +2563,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             withdraw,
             // The parser admits only the closed list, so this parses.
             reason: reason.map(|r| r.parse()).transpose()?,
+            stabilizer_module,
         }),
         #[cfg(feature = "build")]
         Cmd::Score {
@@ -2630,7 +2724,20 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             verbose,
         }),
         #[cfg(feature = "build")]
-        Cmd::Runs { store } => attestor::list(&store),
+        Cmd::Runs {
+            store,
+            action: None,
+        } => attestor::list(&store),
+        #[cfg(feature = "build")]
+        Cmd::Runs {
+            action: Some(RunsCmd::Export { runs, store, out }),
+            ..
+        } => transfer::export(&store, &runs, &out),
+        #[cfg(feature = "build")]
+        Cmd::Runs {
+            action: Some(RunsCmd::Import { file, store }),
+            ..
+        } => transfer::import(&file, &store),
         #[cfg(feature = "build")]
         Cmd::Rederive {
             store,
@@ -8962,6 +9069,39 @@ output_path: '*.tgz'
             assert_eq!(c.upstream, r.upstream.sha256);
         }
 
+        /// A second machine's store holds no run of the first's until it imports one, and then
+        /// `--confirm` repeats it there from the strategy blob the export carried: `trigon runs
+        /// export` on the first machine, `trigon runs import` on the second. Two stores stand for
+        /// the two machines.
+        #[test]
+        fn a_run_imported_from_another_store_is_one_confirm_repeats() {
+            let work = tmpdir("confirm-imported");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            let elsewhere = work.join("elsewhere");
+            let e = confirming(&mut args_for(&work, &elsewhere), &r.id, false).unwrap_err();
+            assert!(
+                format!("{e:#}").contains(&format!("no run `{}`", r.id)),
+                "{e:#}"
+            );
+
+            let file = work.join("run.tar");
+            crate::transfer::export(&dir, std::slice::from_ref(&r.id), &file).unwrap();
+            crate::transfer::import(&file, &elsewhere).unwrap();
+            let mut args = args_for(&work, &elsewhere);
+            let c = confirming(&mut args, &r.id, false).unwrap();
+            assert_eq!(
+                c.candidate.strategy,
+                trigon_strategy::from_yaml(STRATEGY).unwrap(),
+                "the strategy the run stored, carried in the export"
+            );
+            assert_eq!(c.run, r.id);
+            assert_eq!(c.upstream, r.upstream.sha256);
+            assert_eq!(Some(c.cache_key.as_str()), r.cache_key.as_deref());
+            assert_eq!(args.purl, r.target);
+            assert_eq!(args.image, r.environment.base_image);
+            assert_eq!(args.attempt, r.attempt + 1);
+        }
+
         /// What an attempt says it could reuse, from each thing about how it was set up. The gate
         /// counts a same-host pair on this (`docs/19` D8), so each input is asserted, and the value
         /// the build is told about podman's layer cache with it.
@@ -9768,6 +9908,52 @@ output_path: '*.tgz'
                     trigon_attest::REBUILD
                 ]
             );
+        }
+
+        /// `rebuild --attest` names the stabilizer-set module `[publish] stabilizer_module` names,
+        /// as `trigon attest` does, and so holds it to the run first: one it cannot read refuses
+        /// the verdict, and nothing is signed or written.
+        #[test]
+        fn rebuild_attest_names_the_configured_module_and_refuses_one_it_cannot_read() {
+            let work = tmpdir("attest-module");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            let file = work.join("evidence.toml");
+            let module = work.join("missing.wasm");
+            std::fs::write(
+                &file,
+                format!("[publish]\nstabilizer_module = \"{}\"\n", module.display()),
+            )
+            .unwrap();
+            let config = EvidenceConfig::load(&Env {
+                cwd: work.clone(),
+                evidence_config: Some(file),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(
+                config.publish().stabilizer_module.as_deref(),
+                Some(module.as_path())
+            );
+            let path = work.join("claim.json");
+            let e = attest_what_was_recorded(
+                &dir,
+                Some(&r.id),
+                &path,
+                &config,
+                &trigon_attest::Unsigned,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{e:#}").contains(&format!(
+                    "reading the stabilizer-set module {}",
+                    module.display()
+                )),
+                "{e:#}"
+            );
+            assert!(!path.exists());
+            let (rt, store) = store(&dir);
+            let run = rt.block_on(store.get_run(&r.id)).unwrap();
+            assert!(run.attestations.is_empty(), "{:?}", run.attestations);
         }
     }
 
@@ -11776,9 +11962,22 @@ mod mirror {
     /// **Pinned to an exact file.** The archive is content-addressed by nothing, so a floating
     /// `apt-get install` from a third-party repository would put different bytes in the image on
     /// different days — the one thing a base image for a reproducibility tool must not do. This
-    /// names one `.deb` and checks its digest, and `dpkg-deb -x` unpacks it without running a
-    /// maintainer script or touching the package database.
+    /// names one `.deb`, the Containerfile checks it against [`PCL_DEB_SHA256`] before anything
+    /// reads it, and `dpkg-deb -x` unpacks it without running a maintainer script or touching the
+    /// package database.
     const PCL_DEB: &str = "https://download.mono-project.com/repo/ubuntu/pool/main/r/referenceassemblies-pcl/referenceassemblies-pcl_2014.04.14-1xamarin7+ubuntu2004b1_all.deb";
+
+    /// The SHA-256 of [`PCL_DEB`], as Mono's signed apt index gives it.
+    ///
+    /// Read on 2026-09-30 from `dists/stable-focal/InRelease` (`dists/focal/InRelease` is the same
+    /// file), component `main`, whose Release is dated Wed, 12 Jul 2023 15:15:36 UTC. It verifies
+    /// under Mono's signing key `3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF` ("Xamarin Public
+    /// Jenkins (auto-signing)", fetched from keyserver.ubuntu.com and its fingerprint compared).
+    /// The Release gives `main/binary-amd64/Packages` the SHA-256
+    /// `335a820226633d379d092629aad9fea565a4f6cf148ac72e4642e7e81fd2a82e`, which the file fetched
+    /// hashed to, and that file lists this exact `Filename` with this SHA-256 and 1,018,344 bytes,
+    /// which the `.deb` downloaded then matched. `docs/16-findings.md` §3.107.
+    const PCL_DEB_SHA256: &str = "34a050d4e8aa33a81e79e449135feadf32c174d48e8ddfbee947863b0978b107";
 
     /// Where the profiles land, and what the NuGet build tool looks for.
     pub const PCL_ROOT: &str = "/opt/pcl-reference-assemblies";
@@ -11834,9 +12033,13 @@ mod mirror {
             // maintainer scripts from a third-party repository and write to the package database,
             // neither of which this image wants — it needs the assemblies on disk, at a path the
             // build tool knows.
+            //
+            // The digest is checked before `dpkg-deb` reads a byte, and a mismatch fails the image
+            // build: `sha256sum -c` exits non-zero and `set -e` stops the step there.
             containerfile.push_str(&format!(
                 "RUN set -eu; \\\n\
                  \x20 wget -O /tmp/pcl.deb {PCL_DEB}; \\\n\
+                 \x20 echo '{PCL_DEB_SHA256}  /tmp/pcl.deb' | sha256sum -c -; \\\n\
                  \x20 mkdir -p {PCL_ROOT}; \\\n\
                  \x20 dpkg-deb -x /tmp/pcl.deb {PCL_ROOT}; \\\n\
                  \x20 rm /tmp/pcl.deb; \\\n\
@@ -12201,6 +12404,15 @@ mod sweep {
     use super::*;
     use crate::rebuild::Outcome;
 
+    /// The exit code of a sweep that the wall or the memory or disk floor stopped, once it has
+    /// printed its summary: stopped early, and resumable by the same command.
+    ///
+    /// Not 0, because a scheduler that sees 0 reads a finished corpus and a rate over all of it,
+    /// and a wall means the last rows are our own infrastructure failing. Not 1, which is a sweep
+    /// that could not run at all (no targets, an unreadable file), nor 2, `clap`'s refusal of the
+    /// arguments, nor 101 or 141, a panic and a broken pipe.
+    pub const STOPPED: i32 = 3;
+
     pub struct Args {
         pub targets: PathBuf,
         pub image: String,
@@ -12562,6 +12774,13 @@ mod sweep {
         // terminal does.
         progress.finish(rows.len());
         summarize(&rows);
+        // Stopped at a wall or a floor: said in the log already, and now in the exit code, so a
+        // scheduler can tell a finished corpus from one to resume without reading stderr. The
+        // heartbeat is stopped first, as returning would stop it.
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(progress);
+            std::process::exit(STOPPED);
+        }
         Ok(())
     }
 
@@ -13748,7 +13967,7 @@ fn verify_attestation(
     };
 
     let rederived = match rerun {
-        true => Some(rederive_files(&st, files)?),
+        true => Some(rederive_files(&st, files, None)?),
         false => None,
     };
 
@@ -13760,7 +13979,9 @@ fn verify_attestation(
                 "predicateType": st.predicate_type,
                 "outcome": st.predicate["outcome"],
                 "signature": signature,
-                "rederived": rederived.as_ref().map(rederived_json),
+                "rederived": rederived
+                    .as_ref()
+                    .map(|(d, through)| rederived_json(d, through.as_deref())),
             }))?
         ),
         OutputFormat::Text => {
@@ -13788,23 +14009,53 @@ fn verify_attestation(
                 println!("supersedes {} ({})", said("supersedes"), said("reason"));
             }
             println!("signature {signature}");
-            print_rederived(rederived.as_ref());
+            match &rederived {
+                Some((d, through)) => print_rederived(Some(d), through.as_deref()),
+                None => print_rederived(None, None),
+            }
         }
     }
 
-    if rederived.as_ref().is_some_and(|d| !d.holds()) {
+    // A claim that is consistent and not shown to hold exits 0, as one that holds does: see
+    // `print_rederived`.
+    if rederived.as_ref().is_some_and(|(d, _)| d.refuted()) {
         std::process::exit(1);
     }
     Ok(())
 }
 
-/// Re-derive a statement's claim from the two artifacts `--rerun-comparison` was given, through an
-/// archived set where `--stabilizers` names a module: what `verify-attestation` does with a bundle
-/// and with a record alike.
+/// Whether this binary carries the stabilizer set a statement names: the set of that id, under the
+/// digest the statement signs. A statement that names no set is said to be carried, so that
+/// re-deriving it natively says what it lacks.
+pub(crate) fn carries_set(st: &trigon_attest::Statement) -> bool {
+    let set = &st.predicate["stabilizerSet"];
+    match (set["id"].as_str(), set["digest"]["sha256"].as_str()) {
+        (Some(id), Some(digest)) => {
+            trigon_stabilize::profile(id).is_some_and(|s| s.digest().to_hex() == digest)
+        }
+        _ => true,
+    }
+}
+
+/// Re-derive a statement's claim from the two artifacts `--rerun-comparison` was given: what
+/// `verify-attestation` does with a bundle and with a record alike. Also, where it went through an
+/// archived set, which module that was, what binds it and the commit it says it was built from, as
+/// the output says it.
+///
+/// **Natively where this binary carries the statement's set**, and through a stabilizer-set module
+/// where it does not: `published`, the module the record's evidence carries, which the caller has
+/// read and held to the digest the verdict signs (`evidence.stabilizerSetModule`). `--stabilizers
+/// <module.wasm>` is run whatever this binary carries, which is how a verifier checks a module
+/// while the binary can still be compared with it, and is held to the signed digest too where the
+/// statement signs one. **That digest is what makes a module worth running**
+/// ([`trigon_attest::check_set_module`]): the set digest a module reports is its own word, and
+/// any module can give the right one. A statement that signs no module binds none, and a module
+/// given for it is held to its own answer and to the stabilized digests alone, which is said.
 fn rederive_files(
     st: &trigon_attest::Statement,
     files: Rerun<'_>,
-) -> Result<trigon_attest::Rederived> {
+    published: Option<Vec<u8>>,
+) -> Result<(trigon_attest::Rederived, Option<String>)> {
     let (u, r) = match (files.upstream, files.rebuild) {
         (Some(u), Some(r)) => (u, r),
         _ => bail!("--rerun-comparison needs both --upstream and --rebuild"),
@@ -13815,31 +14066,107 @@ fn rederive_files(
     // A `.wasm` module is run; anything else is read as a manifest and described. Chosen by
     // extension rather than by sniffing, because the two failure modes differ: a module we
     // cannot run should say so, and a manifest we cannot parse should say that instead.
-    #[cfg(feature = "wasm")]
-    let mut archived = match stabilizers {
-        Some(p) if p.extension().is_some_and(|e| e == "wasm") => Some(
-            trigon_stabilize_wasm::ArchivedSet::load(p)
-                .with_context(|| format!("loading {}", p.display()))?,
-        ),
-        _ => None,
+    let given = stabilizers.filter(|p| p.extension().is_some_and(|e| e == "wasm"));
+    let named = trigon_attest::signed_set_module(st);
+    let set = || {
+        let digest = st.predicate["stabilizerSet"]["digest"]["sha256"]
+            .as_str()
+            .unwrap_or_default();
+        format!(
+            "{}@{}",
+            st.predicate["stabilizerSet"]["id"].as_str().unwrap_or("?"),
+            &digest[..12.min(digest.len())]
+        )
     };
-    #[cfg(feature = "wasm")]
-    let outcome = match archived.as_mut() {
-        Some(a) => trigon_attest::rederive_with(st, ub, rb, Some(a)),
-        None => trigon_attest::rederive(st, ub, rb),
+    // Whether a module is to be run: one given, or, where this binary does not carry the set, the
+    // one the verdict names. Without one, the claim is re-derived natively, and a set this binary
+    // does not carry is refused there as a set mismatch.
+    let archived = given.is_some() || (!carries_set(st) && named.is_some());
+    // Where the module cannot be run here, a manifest given still says what the set held, as it
+    // does on a set mismatch: the refusal that follows is then not a dead end either.
+    let describe = || {
+        if stabilizers.is_some() {
+            describe_set(st, stabilizers);
+        }
     };
     #[cfg(not(feature = "wasm"))]
     let outcome = {
-        if stabilizers.is_some_and(|p| p.extension().is_some_and(|e| e == "wasm")) {
-            bail!(
-                "this build cannot run a stabilizer module. Rebuild with `--features wasm`, or \
-                 pass the set's `.json` manifest to see what it contained."
-            );
+        let _ = published;
+        match (given, named) {
+            (Some(_), _) => bail!(
+                "this build cannot run a stabilizer module. Build the verifier with `--features \
+                 wasm` (`cargo build -p trigon --no-default-features --features wasm`), or use the \
+                 full build, `cargo build -p trigon`; or pass the set's `.json` manifest to see \
+                 what it contained."
+            ),
+            (None, Some(module)) if archived => {
+                describe();
+                bail!(
+                    "this verdict was made under `{}`, which this binary does not carry, and it \
+                     names the stabilizer-set module sha256:{module} that implements it. This \
+                     build cannot run a module: re-derive it with the verifier built with \
+                     `--features wasm` (`cargo build -p trigon --no-default-features --features \
+                     wasm`), or with the full build, `cargo build -p trigon`.",
+                    set()
+                )
+            }
+            _ => (trigon_attest::rederive(st, ub, rb), None),
         }
-        trigon_attest::rederive(st, ub, rb)
     };
+    #[cfg(feature = "wasm")]
+    let outcome = match (archived, given) {
+        (false, _) => (trigon_attest::rederive(st, ub, rb), None),
+        (true, Some(p)) => {
+            let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+            let m = trigon_attest::check_set_module(st, &bytes)
+                .with_context(|| format!("--stabilizers {}", p.display()))?;
+            let through = match m.signed {
+                true => format!(
+                    "the module given, sha256:{}, which the verdict signs as its stabilizer-set \
+                     module",
+                    m.sha256
+                ),
+                false => format!(
+                    "the module given, sha256:{}. The statement signs no module, so this one is \
+                     held only to the set digest it reports of itself and to the stabilized \
+                     digests the statement signs",
+                    m.sha256
+                ),
+            };
+            let (outcome, commit) = run_module(st, ub, rb, &bytes, p)?;
+            (outcome, Some(format!("{through}; {commit}")))
+        }
+        (true, None) => {
+            let module = named.unwrap_or_default();
+            let Some(bytes) = published else {
+                describe();
+                bail!(
+                    "this verdict was made under `{}`, which this binary does not carry, and it \
+                     names the stabilizer-set module sha256:{module} that implements it. A bundle \
+                     carries no evidence: pass the module with --stabilizers <file.wasm>, from the \
+                     evidence repository's evidence/sha256/{}/{}/{module}, or check the record \
+                     it was published in, whose evidence carries it",
+                    set(),
+                    &module[..2.min(module.len())],
+                    &module[2.min(module.len())..4.min(module.len())]
+                );
+            };
+            // Held to the signed digest by whoever read it, and again here: running the module
+            // rests on it.
+            trigon_attest::check_set_module(st, &bytes)?;
+            let through = format!(
+                "the stabilizer-set module sha256:{module} the record carries, which the verdict \
+                 signs: this binary does not carry `{}`",
+                set()
+            );
+            let path = Path::new("the record's stabilizer-set module");
+            let (outcome, commit) = run_module(st, ub, rb, &bytes, path)?;
+            (outcome, Some(format!("{through}; {commit}")))
+        }
+    };
+    let (outcome, through) = outcome;
     match outcome {
-        Ok(d) => Ok(d),
+        Ok(d) => Ok((d, through)),
         // The one error worth turning into a description rather than a refusal. A verifier who
         // cannot reach the statement's set is not looking at a broken attestation; they are
         // looking at one made under a set their binary does not carry, and saying which
@@ -13852,15 +14179,46 @@ fn rederive_files(
     }
 }
 
-/// What re-deriving found, as `--output json` carries it: `claimed`, `actual`, `stabilizerSet`
-/// and `holds`, and what the statement says the comparison found that re-deriving does not give,
-/// and what was left unchecked.
-fn rederived_json(d: &trigon_attest::Rederived) -> serde_json::Value {
+/// Load a stabilizer-set module from the bytes that were held to its digest, and re-derive the
+/// claim through it. A module that cannot be loaded is a check not made, named by `from`.
+///
+/// Also what the module says of the commit it was built from, for the output: where a verifier who
+/// would rather rebuild the module than run it starts. It is the module's word, and said as that;
+/// an answer that is not a commit is said to be one, and never printed.
+#[cfg(feature = "wasm")]
+fn run_module(
+    st: &trigon_attest::Statement,
+    upstream: Vec<u8>,
+    rebuild: Vec<u8>,
+    bytes: &[u8],
+    from: &Path,
+) -> Result<(
+    Result<trigon_attest::Rederived, trigon_attest::AttestError>,
+    String,
+)> {
+    let mut archived = trigon_stabilize_wasm::ArchivedSet::from_bytes(bytes)
+        .with_context(|| format!("loading {}", from.display()))?;
+    let commit = match archived.source_commit() {
+        Ok(Some(c)) => format!("it says it was built from commit {c}"),
+        Ok(None) => "it names no commit it was built from".to_string(),
+        Err(e) => format!("{e:#}"),
+    };
+    let outcome = trigon_attest::rederive_with(st, upstream, rebuild, Some(&mut archived));
+    Ok((outcome, commit))
+}
+
+/// What re-deriving found, as `--output json` carries it: `claimed`, `actual`, `stabilizerSet`,
+/// `holds` and `consistent`, the stabilizer-set module it went through (`module`, `null` where it
+/// was the set compiled in), and what the statement says the comparison found that re-deriving
+/// does not give, and what was left unchecked.
+fn rederived_json(d: &trigon_attest::Rederived, through: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "claimed": d.claimed,
         "actual": d.actual.to_string(),
         "stabilizerSet": d.stabilizer_set,
+        "module": through,
         "holds": d.holds(),
+        "consistent": d.consistent(),
         "disagreements": d.disagreements.iter().map(|x| serde_json::json!({
             "field": x.field,
             "said": x.said,
@@ -13870,18 +14228,45 @@ fn rederived_json(d: &trigon_attest::Rederived) -> serde_json::Value {
     })
 }
 
-/// The `rederived` lines of `verify-attestation`'s text output.
-fn print_rederived(d: Option<&trigon_attest::Rederived>) {
+/// The `rederived` lines of `verify-attestation`'s text output, after the stabilizer-set module
+/// re-deriving went through, where it went through one.
+///
+/// **Three answers.** The claim holds; it does NOT hold; or, through an archived set, it is
+/// *consistent*: a `normalized` claim whose stabilized forms re-derive equal, as it says, which a
+/// module that returns bytes and nothing about which passes fired cannot show to be `normalized`
+/// rather than `normalized_with_caveats` ([`trigon_attest::Rederived::consistent`]). A consistent
+/// claim is not refuted, and exits as one that holds: `docs/19` §6's 0 is "a verdict at or above
+/// `normalized_with_caveats`", which the archived set does re-derive, so 0 is true whichever tier
+/// the claim has; 1 for a bundle and 4 for a record say the claim is false, which nothing
+/// re-derived shows; and a code of its own would be a sixth meaning in a table CI already reads by
+/// the order 5, 4, 1, 3, 2. The re-derived outcome is never promoted to make it hold.
+fn print_rederived(d: Option<&trigon_attest::Rederived>, through: Option<&str>) {
     let Some(d) = d else {
         // Worth saying outright. Reading a statement is not checking it, and the difference is
         // the entire reason this subcommand exists.
         println!("rederived not attempted — pass --rerun-comparison to check the claim");
         return;
     };
+    if let Some(m) = through {
+        println!("module    {}", style::wrap(&format!("through {m}"), 10));
+    }
     if d.holds() {
         println!(
             "rederived {} under {} — the claim holds",
             d.actual, d.stabilizer_set
+        );
+    } else if d.consistent() {
+        println!(
+            "rederived {}",
+            style::wrap(
+                &format!(
+                    "{} under {}, and the statement claims {} — consistent: the stabilized forms \
+                     are equal, as the claim says; an archived set cannot show which tier of pass \
+                     fired, so the claim's strength is not re-derived",
+                    d.actual, d.stabilizer_set, d.claimed
+                ),
+                10
+            )
         );
     } else if d.claimed != d.actual.to_string() {
         println!(
@@ -13946,6 +14331,8 @@ mod attestor {
         /// A record file to withdraw, with no run.
         pub withdraw: Option<std::path::PathBuf>,
         pub reason: Option<SupersedeReason>,
+        /// `--stabilizer-module`, which wins over `[publish] stabilizer_module`.
+        pub stabilizer_module: Option<std::path::PathBuf>,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -13992,7 +14379,12 @@ mod attestor {
             if args.prune {
                 refuse_prune_before_publication(&store, &id, &config).await?;
             }
-            let signed = sign_run(&store, &id, &config, signer.as_ref(), superseded).await?;
+            let module = args
+                .stabilizer_module
+                .as_deref()
+                .or(config.publish().stabilizer_module.as_deref());
+            let signed =
+                sign_run(&store, &id, &config, signer.as_ref(), superseded, module).await?;
             finish(
                 &store,
                 &id,
@@ -14104,7 +14496,8 @@ mod attestor {
             .build()?;
         rt.block_on(async {
             let store = Store::local(store)?;
-            let signed = sign_run(&store, id, config, signer, None).await?;
+            let module = config.publish().stabilizer_module.as_deref();
+            let signed = sign_run(&store, id, config, signer, None, module).await?;
             finish(
                 &store,
                 id,
@@ -14183,12 +14576,16 @@ mod attestor {
     /// Sign what a stored run supports, after re-deriving it from the bytes, and file every
     /// statement under the run: the one signing path, for `trigon attest` and `trigon rebuild
     /// --attest` alike.
+    ///
+    /// `module` is the stabilizer-set module to name in a verdict ([`set_module`]); a void names
+    /// none, and is signed whatever `module` is.
     async fn sign_run(
         store: &Store,
         id: &str,
         config: &EvidenceConfig,
         signer: &dyn trigon_attest::Signer,
         superseded: Option<Superseded>,
+        module: Option<&Path>,
     ) -> Result<Signed> {
         let record = store.get_run(id).await?;
         println!("run       {id}");
@@ -14394,26 +14791,55 @@ mod attestor {
             let comparison_hex = comparison_digest.to_hex();
             let rebuilt_hex = rebuilt.sha256.to_hex();
             let run = run_identity(&record, &purl);
-            let facts = VerdictFacts {
-                run,
-                derivation: record.derivation.as_deref(),
-                evidence: EvidenceDigests {
-                    stabilizer_set_manifest: Some(&manifest_blob),
-                    comparison: Some(&comparison_hex),
-                    strategy: hex.strategy.as_deref(),
-                    guard_manifest: guard_manifest.as_deref(),
-                    rebuilt_artifact: Some(&rebuilt_hex),
-                },
-                namespace,
-                supersedes,
+            // The verdict, naming the stabilizer-set module where one is given: built once to be
+            // re-derived natively, and again with the module's digest once the module has
+            // reproduced it. `rederive` reads no evidence, so the two check the same claim.
+            let verdict = |module: Option<&str>| {
+                let facts = VerdictFacts {
+                    run,
+                    derivation: record.derivation.as_deref(),
+                    evidence: EvidenceDigests {
+                        stabilizer_set_manifest: Some(&manifest_blob),
+                        stabilizer_set_module: module,
+                        comparison: Some(&comparison_hex),
+                        strategy: hex.strategy.as_deref(),
+                        guard_manifest: guard_manifest.as_deref(),
+                        rebuilt_artifact: Some(&rebuilt_hex),
+                    },
+                    namespace,
+                    supersedes,
+                };
+                Statement::verdict(upstream_subject.clone(), &comparison, &facts)
+                    .context("the comparison is not about the run's published artifact")
             };
-            let statement = Statement::verdict(upstream_subject.clone(), &comparison, &facts)
-                .context("the comparison is not about the run's published artifact")?;
+            let statement = verdict(None)?;
+            // Kept for the module, which is run over the same bytes once they have re-derived the
+            // claim natively: a forged comparison is refused as one, before a module is blamed.
+            let for_module = module.map(|p| (p, upstream.clone(), rebuild.clone()));
             let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
                 .context("re-deriving the claim before signing it")?;
             if !checked.holds() {
                 bail!("refusing to sign: {}", refusal(&checked));
             }
+            let statement = match for_module {
+                Some((path, upstream, rebuild)) => {
+                    let named = set_module(store, path, &comparison, &upstream, &rebuild).await?;
+                    verdict(Some(&named))?
+                }
+                None => {
+                    println!(
+                        "module    {}",
+                        crate::style::wrap(
+                            "none: the verdict names no stabilizer-set module, so once a binary \
+                             no longer carries its set nothing can re-derive it, and `trigon \
+                             publish` refuses it. Build one with scripts/build-set-module.sh and \
+                             set `[publish] stabilizer_module`, or pass --stabilizer-module",
+                            10
+                        )
+                    );
+                    statement
+                }
+            };
             println!(
                 "rederived {} under {} — signing",
                 checked.actual, checked.stabilizer_set
@@ -14590,6 +15016,126 @@ mod attestor {
             attestor_version: crate::TRIGON_VERSION,
             egress: &r.environment.egress,
             attestable: r.environment.attestable,
+        }
+    }
+
+    /// The stabilizer-set module a verdict is to name, checked before it is named: the sha256 of
+    /// its bytes, which the verdict signs as `evidence.stabilizerSetModule`.
+    ///
+    /// A module named beside a claim is what re-derives that claim once no binary carries its set
+    /// (`docs/09` §7.1), so it must reproduce it now, while the set it implements is compiled in
+    /// here to be compared with. Loaded from the bytes read here — the bytes hashed, so the bytes
+    /// run — it must report the run's set digest for the run's profile, and stabilize both stored
+    /// artifacts to exactly the stabilized digests the run recorded, which [`trigon_attest::rederive`]
+    /// has just held to the bytes. A module that does neither, or cannot be loaded, or names the
+    /// commit it was built from as something that is not one, is refused and nothing is signed.
+    /// Then it is kept in the store as a blob, from which `trigon publish` copies it into the
+    /// evidence repository, and the commit it names is said beside this Trigon's
+    /// ([`module_commit`]).
+    async fn set_module(
+        store: &Store,
+        path: &Path,
+        c: &trigon_compare::Comparison,
+        upstream: &[u8],
+        rebuild: &[u8],
+    ) -> Result<String> {
+        use sha2::Digest as _;
+        let sha256 = |b: &[u8]| trigon_core::Digest::from_bytes(sha2::Sha256::digest(b).into());
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading the stabilizer-set module {}", path.display()))?;
+        let hex = sha256(&bytes).to_hex();
+        let refuse = |why: String| {
+            anyhow::anyhow!(
+                "refusing to sign: the stabilizer-set module {} (sha256:{hex}) {why}. A verdict \
+                 names only a module that reproduces its claim; `scripts/build-set-module.sh` \
+                 builds the one for this checkout. Nothing was signed",
+                path.display()
+            )
+        };
+        let mut archived = trigon_stabilize_wasm::ArchivedSet::from_bytes(&bytes)
+            .map_err(|e| refuse(format!("cannot be loaded: {e:#}")))?;
+        let (id, want) = (c.upstream.set.0.as_str(), c.upstream.set.1);
+        let got = archived
+            .digest(id)
+            .map_err(|e| refuse(format!("failed: {e:#}")))?;
+        if got != want {
+            return Err(refuse(format!(
+                "implements `{id}@{}`, and the run compared under `{id}@{}`",
+                crate::short(&got.to_hex()),
+                crate::short(&want.to_hex())
+            )));
+        }
+        for (side, bytes, recorded) in [
+            ("published", upstream, c.upstream.stabilized.sha256),
+            ("rebuilt", rebuild, c.rebuild.stabilized.sha256),
+        ] {
+            let out = archived
+                .stabilize(id, c.upstream.format, bytes)
+                .map_err(|e| refuse(format!("failed on the {side} artifact: {e:#}")))?;
+            let got = sha256(&out);
+            if got != recorded {
+                return Err(refuse(format!(
+                    "reports the run's set digest, and stabilizes the {side} artifact to \
+                     sha256:{}, where the run recorded sha256:{}",
+                    got.to_hex(),
+                    recorded.to_hex()
+                )));
+            }
+        }
+        let commit = archived
+            .source_commit()
+            .map_err(|e| refuse(format!("{e:#}")))?;
+        let kept = store.blobs().put(bytes).await?.to_hex();
+        debug_assert_eq!(kept, hex, "a blob is addressed by the sha256 of its bytes");
+        println!(
+            "module    {}",
+            crate::style::wrap(
+                &format!(
+                    "sha256:{hex}, from {}: implements `{id}@{}` and stabilizes both artifacts as \
+                     the run did, so the verdict names it",
+                    path.display(),
+                    crate::short(&want.to_hex())
+                ),
+                10
+            )
+        );
+        println!(
+            "commit    {}",
+            crate::style::wrap(&module_commit(commit.as_deref()), 10)
+        );
+        Ok(hex)
+    }
+
+    /// What `attest` says of the commit a module names (`trigon_source_commit`), beside the commit
+    /// this Trigon was built from.
+    ///
+    /// Said, and never refused: `attest` asks of a module only that it reproduce the claim it will
+    /// be named beside. The commit is the module's own word, and what it is for is telling a
+    /// verifier who would rather rebuild the module than run it where to start, which a module
+    /// built from uncommitted changes cannot, and one that names no commit leaves them to find.
+    fn module_commit(named: Option<&str>) -> String {
+        let ours = crate::TRIGON_VERSION
+            .split_once("+git.")
+            .map_or("unknown", |(_, rev)| rev);
+        match named {
+            None => "the module names no commit it was built from, so a verifier who rebuilds it \
+                     to compare digests has to find the commit: it was built by a plain `cargo \
+                     build`, not scripts/build-set-module.sh, or outside a git checkout"
+                .to_string(),
+            Some(c) if c.ends_with(".dirty") => format!(
+                "the module was built from a tree with changes {} does not have, so nobody can \
+                 rebuild it from a commit and compare digests. Build it from a clean checkout for \
+                 a verdict you publish",
+                c.trim_end_matches(".dirty")
+            ),
+            Some(c) if c == ours => format!(
+                "the module was built from {c}, as this Trigon was: a verifier rebuilds it from \
+                 that commit with scripts/build-set-module.sh and compares digests"
+            ),
+            Some(c) => format!(
+                "the module was built from {c}, and this Trigon from {ours}: a verifier rebuilds \
+                 the module from {c}, which it names wherever it runs"
+            ),
         }
     }
 

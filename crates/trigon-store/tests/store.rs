@@ -582,6 +582,144 @@ async fn a_statement_filed_per_target_before_runs_had_their_own_still_reads() {
 }
 
 #[tokio::test]
+async fn a_statement_filed_where_its_run_names_it_is_never_written_over_another() {
+    // `trigon runs import` files each statement at the path the run it came with names it by. The
+    // same bytes already there are the same statement; other bytes are refused and left as they
+    // are; and a path outside the layout this store writes is refused before anything is written.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::local(dir.path()).unwrap();
+    let path = "attestations/npm/@babel/core/7.24.0+b1/core-7.24.0.tgz/1789000000-ee/\
+                equivalence.intoto.json";
+    assert!(Store::is_statement_path(path));
+    let ours = bytes::Bytes::from_static(b"{\"payload\":\"ours\"}");
+    assert_eq!(s.statement_bytes(path).await.unwrap(), None);
+    s.put_statement(path, ours.clone()).await.unwrap();
+    assert_eq!(s.statement_bytes(path).await.unwrap(), Some(ours.clone()));
+    s.put_statement(path, ours.clone()).await.unwrap();
+    let e = s
+        .put_statement(path, bytes::Bytes::from_static(b"theirs"))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, StoreError::StatementTaken(_)), "{e}");
+    assert_eq!(s.statement_bytes(path).await.unwrap(), Some(ours.clone()));
+
+    for bad in [
+        "runs/1789000000-ee.json",
+        "attestations/x.intoto.json",
+        "attestations/npm/x/1.0.0/../../../../runs/x.intoto.json",
+        "attestations/npm//x/1.0.0/x.tgz/a.intoto.json",
+        "attestations/npm/x/1.0.0/x.tgz/./a.intoto.json",
+        "attestations/npm/x/1.0.0/x.tgz/equivalence.json",
+        "attestations/npm/x/1.0.0/x.tgz/a b.intoto.json",
+        "attestations/npm/x/1.0.0/x.tgz/a%2F.intoto.json",
+        "/attestations/npm/x/1.0.0/x.tgz/a.intoto.json",
+    ] {
+        assert!(!Store::is_statement_path(bad), "{bad}");
+        let e = s.put_statement(bad, ours.clone()).await.unwrap_err();
+        assert!(matches!(e, StoreError::Malformed(_)), "{bad}: {e}");
+        // The refusal names every character the rule allows, a PEP 440 epoch's `!` among them.
+        assert!(e.to_string().contains("`@`, `+` and `!`"), "{bad}: {e}");
+    }
+    let files = walk(dir.path());
+    assert_eq!(
+        files.len(),
+        1,
+        "the one statement and nothing else: {files:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_imported_is_created_and_never_written_over_another() {
+    // `trigon runs import` writes each record as a create, because a look before the write leaves
+    // a window a writer may file another record in. The same record already there is the same run
+    // and answered as written; another is refused and left as it is; and an id the store cannot
+    // address is refused before anything is written.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::local(dir.path()).unwrap();
+    let up = s.blobs().put(&b"upstream bytes"[..]).await.unwrap();
+    let mut ours = RunRecord::new(
+        "1789000000-ee",
+        "pkg:npm/left-pad@1.3.0",
+        artifact("left-pad-1.3.0.tgz", &up, 14),
+        env(),
+        "2026-09-11T19:00:00Z",
+    );
+    ours.host = Some("machine-id:one".into());
+    s.create_run(&ours).await.unwrap();
+    assert_eq!(s.get_run(&ours.id).await.unwrap(), ours);
+    s.create_run(&ours).await.unwrap();
+
+    let mut theirs = ours.clone();
+    theirs.host = Some("machine-id:two".into());
+    let e = s.create_run(&theirs).await.unwrap_err();
+    assert!(matches!(e, StoreError::RunTaken(_)), "{e}");
+    assert_eq!(trigon_core::Classify::fault(&e), trigon_core::Fault::Policy);
+    assert!(!trigon_core::Classify::is_retryable(&e));
+    assert_eq!(s.get_run(&ours.id).await.unwrap(), ours);
+
+    let mut unaddressable = ours.clone();
+    unaddressable.id = "../1789000000-ee".into();
+    let e = s.create_run(&unaddressable).await.unwrap_err();
+    assert!(matches!(e, StoreError::Malformed(_)), "{e}");
+    assert_eq!(s.list_runs().await.unwrap(), vec![ours.id.clone()]);
+}
+
+#[tokio::test]
+async fn every_path_a_statement_is_filed_at_is_one_an_import_files_it_at() {
+    // A run attested in one store names the paths `put_attestation` chose, and `trigon runs
+    // import` refuses a run naming a path `is_statement_path` does not accept. So each ecosystem's
+    // names, versions and artifact files pass: a scope, build metadata, and a PEP 440 epoch.
+    let s = Store::in_memory();
+    let env = trigon_attest::Envelope::new(b"payload", vec![]);
+    for (purl, artifact) in [
+        ("pkg:npm/@babel/core@7.24.0", "core-7.24.0.tgz"),
+        ("pkg:pypi/foo@1!2.0", "foo-1!2.0.tar.gz"),
+        ("pkg:pypi/foo@1.0", "foo-1.0-py3-none-any.whl"),
+        (
+            "pkg:cargo/foo_bar@1.0.0-rc.1+b1",
+            "foo_bar-1.0.0-rc.1+b1.crate",
+        ),
+        (
+            "pkg:nuget/Newtonsoft.Json@13.0.3",
+            "newtonsoft.json.13.0.3.nupkg",
+        ),
+    ] {
+        let reference: trigon_core::TargetRef = purl.parse().unwrap();
+        let target = trigon_core::Target::new(reference, trigon_core::ArtifactId::new(artifact));
+        let path = s
+            .put_attestation(&target, "1789000000-0a1b2c3d", artifact, EQUIVALENCE, &env)
+            .await
+            .unwrap();
+        assert!(Store::is_statement_path(&path), "{purl}: {path}");
+        let bytes = s.statement_bytes(&path).await.unwrap();
+        assert_eq!(
+            bytes.as_deref(),
+            Some(&serde_json::to_vec_pretty(&env).unwrap()[..])
+        );
+    }
+}
+
+#[test]
+fn a_run_id_is_one_the_store_writes_and_lists_back() {
+    // What `trigon runs import` holds an imported record's id to before writing anything it names,
+    // and what `put_run` refuses afterwards.
+    for good in ["1789000000-0a1b2c3d", "0001-a", "run_1.b"] {
+        assert!(Store::is_run_id(good), "{good}");
+    }
+    for bad in [
+        "",
+        ".hidden",
+        "../x",
+        "a/b",
+        "a%2Fb",
+        "a b",
+        &"x".repeat(129),
+    ] {
+        assert!(!Store::is_run_id(bad), "{bad}");
+    }
+}
+
+#[tokio::test]
 async fn a_withdrawal_is_filed_under_the_record_it_withdraws_and_never_overwritten() {
     // It has no run to be filed under (`docs/19` §3), so it goes under the record's digest, and a
     // second, different withdrawal of the same record is written beside the first.

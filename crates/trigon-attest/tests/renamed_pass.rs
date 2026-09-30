@@ -1,7 +1,7 @@
 //! A record signed before a pass was renamed is re-derived under the set it was signed with.
 //!
 //! The set digest covers each pass's id, stage, risk and provenance, and not its code
-//! (`docs/19-distribution-and-lookup.md` §11, open question 1). So a pass whose observable
+//! (`docs/19-distribution-and-lookup.md` §11.1, D9). So a pass whose observable
 //! behaviour changes has to change its id, or a record signed under the old behaviour is re-derived
 //! under the new one with the digest it was signed with, and an honest record reads as refuted.
 //!

@@ -95,6 +95,7 @@ fn with_nothing_configured_every_setting_has_its_default() {
     assert_eq!(p.origin, None);
     assert_eq!(p.disputes, None);
     assert_eq!(p.log_key, None);
+    assert_eq!(p.stabilizer_module, None);
     assert_eq!(
         p.divergences,
         Divergences::Refuse,
@@ -193,6 +194,7 @@ branch = "evidence"
 origin = "{ORIGIN}"
 disputes = "https://github.com/owner/trigon-evidence/issues"
 log_key = "~/.config/trigon/log.key"
+stabilizer_module = "~/.config/trigon/stabilizers.wasm"
 divergences = "feed"
 rebuilt_artifacts = "github-release"
 same_host_confirmation = true
@@ -240,6 +242,10 @@ attestation_key = "attestation.pub"
     assert_eq!(
         p.log_key.as_deref(),
         Some(r.join("home/.config/trigon/log.key").as_path())
+    );
+    assert_eq!(
+        p.stabilizer_module.as_deref(),
+        Some(r.join("home/.config/trigon/stabilizers.wasm").as_path())
     );
     assert_eq!(p.divergences, Divergences::Feed);
     assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::GithubRelease);
@@ -328,6 +334,67 @@ fn an_unknown_key_is_an_error_in_every_table() {
             "{text}: {m}"
         );
     }
+}
+
+/// `[publish] stabilizer_module` is a path, taken as `log_key` is: `~/` expanded to the home, a
+/// relative path from the file that names it, an absolute one as it is, and any other `~` refused.
+/// It is the publisher's to set, so a project's file that sets it is refused whole, and a misspelt
+/// one is an unknown key, never a module silently not named.
+#[test]
+fn the_stabilizer_module_is_a_path_the_users_file_names() {
+    let r = root("stabilizer-module");
+    for (value, want) in [
+        (
+            "~/modules/set.wasm".to_string(),
+            r.join("home/modules/set.wasm"),
+        ),
+        (
+            "modules/set.wasm".into(),
+            r.join("home/.config/trigon/modules/set.wasm"),
+        ),
+        (
+            r.join("elsewhere/set.wasm").display().to_string(),
+            r.join("elsewhere/set.wasm"),
+        ),
+    ] {
+        write(
+            &user_file(&r),
+            &format!("[publish]\nstabilizer_module = \"{value}\"\n"),
+        );
+        let c = loads(&env(&r));
+        assert_eq!(
+            c.publish().stabilizer_module.as_deref(),
+            Some(want.as_path())
+        );
+    }
+
+    write(
+        &user_file(&r),
+        "[publish]\nstabilizer_module = \"~root/set.wasm\"\n",
+    );
+    let m = load(&env(&r)).unwrap_err();
+    assert!(
+        m.contains("[publish] stabilizer_module") && m.contains("only `~/`"),
+        "{m}"
+    );
+
+    write(
+        &user_file(&r),
+        "[publish]\nstabilizer_modules = \"set.wasm\"\n",
+    );
+    let m = load(&env(&r)).unwrap_err();
+    assert!(
+        m.contains("stabilizer_modules") && m.contains("unknown field"),
+        "{m}"
+    );
+
+    std::fs::remove_file(user_file(&r)).unwrap();
+    write(
+        &project_file(&r),
+        "[publish]\nstabilizer_module = \"set.wasm\"\n",
+    );
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("it sets [publish]"), "{m}");
 }
 
 /// `same_host_local_images` widens what a same-host confirmation may run on, so set without
@@ -1010,6 +1077,24 @@ fn a_project_file_that_links_inside_the_project_is_read() {
     );
     std::os::unix::fs::symlink(r.join("project/config/evidence.toml"), project_file(&r)).unwrap();
     assert!(loads(&env(&r)).source("theirs").is_some());
+}
+
+#[test]
+fn a_trigon_that_is_a_file_is_a_project_with_no_file_of_its_own() {
+    // `.trigon/evidence.toml` under a `.trigon` that is a file fails with ENOTDIR, and was an
+    // error of the host's that stopped every command that reads the configuration.
+    let r = root("project-dot-trigon-file");
+    write(&r.join("project/.trigon"), "something else's\n");
+    let c = loads(&env(&r));
+    assert!(c.sources().is_empty());
+    assert!(c.files_read().is_empty());
+    // The same through a link to a file.
+    std::fs::remove_file(r.join("project/.trigon")).unwrap();
+    write(&r.join("project/other"), "something else's\n");
+    std::os::unix::fs::symlink(r.join("project/other"), r.join("project/.trigon")).unwrap();
+    let c = loads(&env(&r));
+    assert!(c.sources().is_empty());
+    assert!(c.files_read().is_empty());
 }
 
 #[test]

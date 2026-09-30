@@ -42,7 +42,7 @@ pub use rotation::{KeyChange, KeyEpoch, KeyHistory, LeafPos};
 pub use tiles::{Append, Bundle, Tile, TileHashes, plan_append};
 pub use verify::{
     Beginning, ChainedLog, Disagreement, Extension, RefusedLog, VerifiedLog, VerifiedSource,
-    check_accepted, check_continuation, compare_chains, find_predecessor, follow, open_checkpoint,
-    prove_inclusion_from_tiles, same_log, successor_vkey, verify_beginning, verify_continuation,
-    verify_extension, verify_extension_from_tiles, verify_log, verify_source,
+    check_accepted, check_continuation, compare_chains, find_predecessor, follow, holds_no_log,
+    open_checkpoint, prove_inclusion_from_tiles, same_log, successor_vkey, verify_beginning,
+    verify_continuation, verify_extension, verify_extension_from_tiles, verify_log, verify_source,
 };

@@ -9,12 +9,13 @@
 //! ([`super::remote`]).
 //!
 //! **Per source, never merged** (§6.1). Each source's answer is printed beside its name, the file
-//! that added it and the keys it rests on, with the checkpoint it came from; every record the key
-//! led to is shown with the fields §4.2 has every client render — the outcome as a string, the set,
-//! when and which Trigon, the egress tier and `attestable`, the derivation, the falsifying command
-//! and the dispute pointer — and a superseded one struck through with its reason and both leaves.
-//! Two sources that answer differently are said to disagree, and neither is taken over the other.
-//! A record found by sha1 alone says that sha1 is collision-broken.
+//! that added it and the keys it rests on, with the checkpoint it came from, on a line of its own
+//! that another user's for the same log can be compared with ([`crate::clones::checkpoint_line`]);
+//! every record the key led to is shown with the fields §4.2 has every client render — the outcome
+//! as a string, the set, when and which Trigon, the egress tier and `attestable`, the derivation,
+//! the falsifying command and the dispute pointer — and a superseded one struck through with its
+//! reason and both leaves. Two sources that answer differently are said to disagree, and neither is
+//! taken over the other. A record found by sha1 alone says that sha1 is collision-broken.
 //!
 //! **Exit codes are §6's**, from every source's answer weighed as `trigon_attest::evidence::
 //! exit_code` weighs them.
@@ -27,11 +28,11 @@ use trigon_attest::evidence::{
     first_that_wins,
 };
 use trigon_attest::location::printable;
-use trigon_attest::log::LeafPos;
+use trigon_attest::log::{Checkpoint, LeafPos};
 use trigon_core::{Match, RiskTier};
 
 use super::remote::{self, Http, Remote};
-use super::{Mode, Ready, ready};
+use super::{Mode, Ready, checkpoint_json, checkpoint_line, ready};
 use crate::OutputFormat;
 
 /// The outcome floor where none is asked for (`docs/19` §6).
@@ -64,6 +65,9 @@ pub(crate) struct Asker<'h> {
     /// What every answer from it carries: its name, the file that added it, the keys it rests on,
     /// and the checkpoint its answers come from.
     pub label: String,
+    /// That checkpoint, where it has one — its clones opened, or its log read over HTTPS — printed
+    /// beside the label as [`checkpoint_line`] has every report print it.
+    pub checkpoint: Option<Checkpoint>,
     /// Whether its being unknown fails a check: `required = true`, `--require`, or
     /// `TRIGON_EVIDENCE_REPO`.
     pub required: bool,
@@ -566,6 +570,7 @@ pub(crate) fn askers<'h>(
                     Asker {
                         name,
                         label,
+                        checkpoint: r.opened.as_ref().map(|o| o.checkpoint_of().clone()),
                         required: r.source.required,
                         project_file: matches!(r.source.added_by, AddedBy::ProjectFile(_)),
                         first_use: r.first_use.is_some(),
@@ -596,6 +601,7 @@ pub(crate) fn askers<'h>(
                 let mut a = Asker {
                     name: s.name.clone(),
                     label: format!("`{}`, {}", s.name, super::added_by(&s.added_by)),
+                    checkpoint: None,
                     required: required(&s),
                     project_file: matches!(s.added_by, AddedBy::ProjectFile(_)),
                     first_use: false,
@@ -617,6 +623,7 @@ pub(crate) fn askers<'h>(
                 match Remote::open(http, config, &s) {
                     Ok(r) if r.frozen(config.freshness(), now) => {
                         a.label.push_str(&format!("; {}", r.label()));
+                        a.checkpoint = Some(r.checkpoint().clone());
                         a.standing = "frozen";
                         a.why = Some(match r.newest {
                             Some(t) => format!(
@@ -631,6 +638,7 @@ pub(crate) fn askers<'h>(
                     }
                     Ok(r) => {
                         a.label.push_str(&format!("; {}", r.label()));
+                        a.checkpoint = Some(r.checkpoint().clone());
                         a.notes.extend(r.notes.iter().cloned());
                         a.how = How::Remote(Box::new(r));
                     }
@@ -859,6 +867,9 @@ pub(crate) fn said_word(s: &Said) -> String {
 
 fn print_source(a: &Asker<'_>, x: &Asked) {
     println!("source    {}", crate::style::wrap(&a.label, 10));
+    if let Some(c) = &a.checkpoint {
+        println!("{}", checkpoint_line(c));
+    }
     for n in &a.notes {
         println!("note      {}", crate::style::wrap(&printable(n), 10));
     }
@@ -1044,6 +1055,7 @@ pub(crate) fn source_json(a: &Asker<'_>, x: &Asked) -> Value {
     json!({
         "name": a.name,
         "label": a.label,
+        "checkpoint": a.checkpoint.as_ref().map(checkpoint_json),
         "required": a.required,
         "projectFile": a.project_file,
         "trustOnFirstUse": a.first_use,

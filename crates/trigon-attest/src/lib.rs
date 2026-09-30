@@ -37,6 +37,6 @@ pub use verdict::{
     WITHDRAWAL, evidence_key, is_primary, is_verdict, set_manifest_file,
 };
 pub use verify::{
-    ArchivedStabilizer, Disagreement, Rederived, ReportCheck, rederive, rederive_with,
-    sign_statement, subject_sha256,
+    ArchivedStabilizer, Disagreement, Rederived, ReportCheck, SetModule, check_set_module,
+    rederive, rederive_with, sign_statement, signed_set_module, subject_sha256,
 };

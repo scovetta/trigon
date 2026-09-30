@@ -1235,6 +1235,11 @@ fn compressed(b: &[u8]) -> Option<(u32, usize)> {
 }
 
 /// How many times its own size an assembly's canonical form may reach before it is declined.
+///
+/// Measured over 5,582 real IL-only assemblies (a NuGet cache, an SDK, source checkouts, fetched
+/// and rebuilt packages): the form is at most 2.21 times the file, a reference assembly's, and 1.54
+/// at p99 (`docs/16-findings.md` §3.107). Declining costs normalization and never a false match,
+/// so the bound sits well clear.
 const MAX_EXPANSION: usize = 4;
 
 /// One field of a record: its length as a little-endian `u32`, then its bytes. A field too long for

@@ -228,12 +228,17 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
                     // Bottom of the depth dial. One last call with no reasoning at all, which is a
                     // different setting rather than a lower one — and the only remaining way to
                     // hand the whole budget to the answer.
+                    //
+                    // Still at the floor, as `opinion::on_diff` asks. `None` here is the
+                    // provider's *default* depth, and a provider that is sent a depth but not
+                    // `Reasoning::Off` — OpenAI — would think harder on this call than on the one
+                    // that was already too big.
                     tracing::warn!(
                         limit,
                         thinking,
                         "the answer did not fit at the lowest depth; asking once with reasoning off"
                     );
-                    return attempt(provider, model, task, None, Reasoning::Off);
+                    return attempt(provider, model, task, Some(Effort::Low), Reasoning::Off);
                 }
             },
             other => return other,
@@ -868,9 +873,11 @@ mod truncation {
         let p = fussy(None);
         propose(&p, "m", &super::tests::task()).expect("the no-reasoning call answers");
         let seen = p.seen.lock().unwrap().clone();
+        // The last call stays at the floor. `None` would be the provider's default depth, and a
+        // provider sent a depth but not `Reasoning::Off` would think harder than the call before.
         assert_eq!(
             seen.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
-            vec![Some(Effort::Medium), Some(Effort::Low), None],
+            vec![Some(Effort::Medium), Some(Effort::Low), Some(Effort::Low)],
         );
         assert_eq!(
             seen.last().unwrap().1,

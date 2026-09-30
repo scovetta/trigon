@@ -125,6 +125,22 @@ pub enum StoreError {
         digest: String,
     },
 
+    /// A statement file is already at the path a run names another at, and holds other bytes
+    /// ([`Store::put_statement`]).
+    #[error(
+        "{0} already holds a different statement, and statements are never overwritten: the run \
+         naming this path names another statement at it than the one the store holds"
+    )]
+    StatementTaken(String),
+
+    /// A run record is already under the id another is created at, and says something else
+    /// ([`Store::create_run`]).
+    #[error(
+        "run `{0}` is in this store already, and its record here differs: a run id names one run, \
+         and a record is never written over another's"
+    )]
+    RunTaken(String),
+
     #[error(transparent)]
     Object(#[from] object_store::Error),
 
@@ -142,6 +158,9 @@ impl Classify for StoreError {
             // should not have, or the store lost data. Either way somebody should look now.
             StoreError::Corrupt { .. } => Fault::Bug,
             StoreError::NotAttested(_) => Fault::Policy,
+            // A refusal to overwrite a statement or a record, which is the store's rule and not a
+            // fault in it.
+            StoreError::StatementTaken(_) | StoreError::RunTaken(_) => Fault::Policy,
             // Nothing a store does on its own produces a thousand differing statements for one
             // run; a caller in a loop does.
             StoreError::NoFreeAttestationPath { .. } => Fault::Bug,
@@ -190,7 +209,9 @@ impl Classify for StoreError {
             // Nor will a directory that is not there appear by opening it again.
             StoreError::NotAStore(_) => false,
             // A refusal we issued on purpose answers the same way every time.
-            StoreError::NotAttested(_) => false,
+            StoreError::NotAttested(_)
+            | StoreError::StatementTaken(_)
+            | StoreError::RunTaken(_) => false,
             // The names that are taken stay taken.
             StoreError::NoFreeAttestationPath { .. } => false,
         }
@@ -385,22 +406,92 @@ impl Store {
             && !id.starts_with('.')
     }
 
+    /// Whether [`Self::put_run`] would write a record under `id`: the rule of `addressable`, for a
+    /// caller that must refuse a record before it writes anything the record names, as `trigon runs
+    /// import` does.
+    pub fn is_run_id(id: &str) -> bool {
+        Self::addressable(id)
+    }
+
+    /// Whether `path` is one [`Self::put_statement`] writes a statement at: under `attestations/`,
+    /// ending `.intoto.json`, at least six segments deep as the per-target layout is, and every
+    /// segment a non-empty run of letters, digits, `-`, `_`, `.`, `@`, `+` and `!` that is not `.`
+    /// or `..`.
+    ///
+    /// Narrower than what `ObjPath::from` would take, which percent-encodes a `..` rather than
+    /// refusing it and drops an empty segment: a path in a record that came from another store is
+    /// held to the shape this store writes, so it cannot name a file anywhere else, or name one
+    /// file in the record and another on disk. The characters are the ones a purl type, a registry
+    /// name, a version, an artifact's file name and a run id are written with; `!` is a PEP 440
+    /// epoch's, as in `1!2.0`, and `ObjPath::from` writes it as it is.
+    pub fn is_statement_path(path: &str) -> bool {
+        let segments: Vec<&str> = path.split('/').collect();
+        path.len() <= 1024
+            && segments.len() >= 6
+            && segments[0] == "attestations"
+            && path.ends_with(".intoto.json")
+            && segments.iter().all(|s| {
+                !s.is_empty()
+                    && *s != "."
+                    && *s != ".."
+                    && s.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+' | '!')
+                    })
+            })
+    }
+
     /// Write a run record, replacing any earlier version of it.
     pub async fn put_run(&self, r: &RunRecord) -> Result<(), StoreError> {
-        if !Self::addressable(&r.id) {
-            return Err(StoreError::Malformed(format!(
-                "`{}` is not a usable run id. Letters, digits, `-`, `_` and `.` only, at most 128 \
-                 of them, not starting with a dot — anything else is percent-encoded on the way in \
-                 and not decoded on the way out, so the run would be listed under a name it cannot \
-                 be fetched by.",
-                r.id
-            )));
-        }
+        Self::usable_run_id(&r.id)?;
         let body = serde_json::to_vec_pretty(r)?;
         self.inner
             .put(&Self::run_path(&r.id), PutPayload::from(body))
             .await?;
         Ok(())
+    }
+
+    /// Write a run record where the store holds none under its id, as the store it was made in
+    /// holds it: `trigon runs import`.
+    ///
+    /// **Never over another**, as [`Self::put_statement`] never writes over a statement: the write
+    /// is a create that fails where the name is taken, the same record already there is the same
+    /// run and answered as written, and another is [`StoreError::RunTaken`] and left as it is. A
+    /// look before a plain write would leave a window in which a record another writer files under
+    /// the same id is replaced, and [`Self::keeping`] is shared between writers, so it closes none.
+    /// An id [`Self::put_run`] refuses is [`StoreError::Malformed`], and nothing is written.
+    pub async fn create_run(&self, r: &RunRecord) -> Result<(), StoreError> {
+        Self::usable_run_id(&r.id)?;
+        let location = Self::run_path(&r.id);
+        let body = serde_json::to_vec_pretty(r)?;
+        let written = self
+            .inner
+            .put_opts(&location, PutPayload::from(body), PutMode::Create.into())
+            .await;
+        match written {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                let there = self.inner.get(&location).await?.bytes().await?;
+                let there: RunRecord = serde_json::from_slice(&there)?;
+                match there == *r {
+                    true => Ok(()),
+                    false => Err(StoreError::RunTaken(r.id.clone())),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The refusal a write under `id` gives where [`Self::addressable`] says no.
+    fn usable_run_id(id: &str) -> Result<(), StoreError> {
+        match Self::addressable(id) {
+            true => Ok(()),
+            false => Err(StoreError::Malformed(format!(
+                "`{id}` is not a usable run id. Letters, digits, `-`, `_` and `.` only, at most \
+                 128 of them, not starting with a dot — anything else is percent-encoded on the \
+                 way in and not decoded on the way out, so the run would be listed under a name it \
+                 cannot be fetched by."
+            ))),
+        }
     }
 
     pub async fn get_run(&self, id: &str) -> Result<RunRecord, StoreError> {
@@ -788,6 +879,63 @@ impl Store {
     pub async fn get_attestation(&self, path: &str) -> Result<trigon_attest::Envelope, StoreError> {
         let bytes = self.inner.get(&ObjPath::from(path)).await?.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// A statement file's bytes as the store holds them, by the path a run record names it by, or
+    /// `None` where no file is there.
+    ///
+    /// The bytes, not an [`trigon_attest::Envelope`] read from them: `trigon runs export` carries a
+    /// statement to another store as the file it is, and `import` compares what it carries with
+    /// what is already at the path.
+    pub async fn statement_bytes(&self, path: &str) -> Result<Option<bytes::Bytes>, StoreError> {
+        match self.inner.get(&ObjPath::from(path)).await {
+            Ok(r) => Ok(Some(r.bytes().await?)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// File a statement at the path a run record names it by, as it is filed in the store the run
+    /// came from: `trigon runs import`.
+    ///
+    /// **Never over another**, as [`Self::put_attestation`] never writes over one: the write is a
+    /// create that fails where the name is taken, the same bytes already there are the same
+    /// statement and answered as written, and other bytes are [`StoreError::StatementTaken`]. A
+    /// path [`Self::is_statement_path`] refuses is [`StoreError::Malformed`], and nothing is
+    /// written.
+    pub async fn put_statement(
+        &self,
+        path: &str,
+        bytes: impl Into<bytes::Bytes>,
+    ) -> Result<(), StoreError> {
+        let bytes: bytes::Bytes = bytes.into();
+        if !Self::is_statement_path(path) {
+            return Err(StoreError::Malformed(format!(
+                "`{path}` is not a path this store files a statement at: under `attestations/`, \
+                 ending `.intoto.json`, and every segment letters, digits, `-`, `_`, `.`, `@`, \
+                 `+` and `!`, never `.` or `..`"
+            )));
+        }
+        let location = ObjPath::from(path);
+        let written = self
+            .inner
+            .put_opts(
+                &location,
+                PutPayload::from_bytes(bytes.clone()),
+                PutMode::Create.into(),
+            )
+            .await;
+        match written {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                let there = self.inner.get(&location).await?.bytes().await?;
+                match there == bytes {
+                    true => Ok(()),
+                    false => Err(StoreError::StatementTaken(path.to_string())),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Drop the rebuilt artifact's bytes for a run that matched, keeping its digests.

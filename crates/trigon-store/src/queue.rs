@@ -784,10 +784,12 @@ impl Queue {
 
 /// The run row: small scalars and one digest, never the record itself.
 ///
-/// **Row version, not last-writer-wins.** D7 in the threat model verifies that there is no lock of
-/// any kind around a run record and disclaims the consequence rather than mitigating it. Here the
-/// row is where exclusion lives: an update carries the version it read and loses if somebody else
-/// has moved on. `ON CONFLICT` keeps a re-record idempotent while refusing to move a run backwards.
+/// **A finished run is not moved back.** D7 in the threat model verifies that there is no lock of
+/// any kind around a run record and disclaims the consequence rather than mitigating it. The
+/// `WHERE` on `ON CONFLICT` is the one condition an update is held to: a row that is `done` takes
+/// another `done` record and ignores a record of any earlier state, which is a stale copy arriving
+/// late. Otherwise the last writer wins: `version` counts the updates a row took, and no caller
+/// yet carries the version it read to compare, so D7 is narrowed rather than closed.
 async fn insert_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     r: &RunRecord,
@@ -805,7 +807,8 @@ async fn insert_run(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1) \
          ON CONFLICT (id) DO UPDATE SET \
            state = $4, outcome = $5, terminal = $6, fault = $7, failure_code = $8, \
-           record_ref = $11, finished = $13, version = run.version + 1",
+           record_ref = $11, finished = $13, version = run.version + 1 \
+         WHERE NOT (run.state = 'done' AND excluded.state <> 'done')",
     )
     .bind(&r.id)
     .bind(&r.target)

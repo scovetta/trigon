@@ -1404,30 +1404,36 @@ item 2). Two practices follow from that.
 refuses to compare across differing set digests: it re-derives under today's set and labels the
 result a new claim. Checking the old claim itself needs the code that made it, so
 `trigon-stabilize-wasm` compiles the stabilizer registry of one commit, every profile in it, into a
-WebAssembly core module. `verify-attestation`, on a binary built with `--features wasm`, asks the
-module for the digest of the profile the statement names, refuses a module that answers with
-another, and re-derives the comparison through it:
+WebAssembly core module. `scripts/build-set-module.sh` builds it reproducibly. Every published
+verdict names its module by sha256, `trigon attest` names one only once it has reproduced the run,
+and `trigon publish` puts it in `evidence/` beside the record
+([`09-attestations.md`](09-attestations.md) §7.1). `verify-attestation`, where its binary does not
+carry the set a verdict names, runs the module the record carries, once the module's sha256 is the
+one the verdict signs; it also asks the module for the digest of the profile the statement names,
+and refuses one that answers with another. `--stabilizers` runs a module given on the command line:
 
 ```
-cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+scripts/build-set-module.sh
 trigon verify-attestation --rerun-comparison --stabilizers set.wasm …
 ```
 
+The full build runs modules; the verifier build needs `--features wasm`.
 `crates/trigon-stabilize-wasm/tests/parity.rs` checks that a module reports the native digest of
 every profile and stabilizes sample artifacts to the native bytes. A published set manifest
 (`SetManifest`, as JSON) lists the members exactly as the digest covers them and recomputes to the
 digest it claims, so a reader without the module still learns what the set was. A module returns
 stabilized bytes and no `applied` list, so a claim re-derived through one reaches
-`normalized_with_caveats` at best ([`16-findings.md`](16-findings.md) §4b).
+`normalized_with_caveats` at best, and a `normalized` claim re-derived so is reported *consistent*,
+neither held nor refuted ([`16-findings.md`](16-findings.md) §4b).
 
 **Since 62781a8, a pass whose behaviour changes takes a new id.** Under an unchanged id, a change to
 what a pass writes or reports keeps the set digest, and today's code would re-derive an old record
 differently under the digest it was signed with, so an honest record would read as refuted.
-[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §11, open question 1, asks whether
-the digest should cover code instead. Until the project settles that question, a changed pass takes
-a new id with a `-vN` suffix: the new id moves the set digest, and a record made under the old one
-goes to its archived set, where the code that made it re-derives it. Three passes took new ids in
-62781a8:
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) D9 (§11.1) decides that the digest
+keeps covering ids and not code, and that each set is archived as a WASM module in `evidence/`. So
+a changed pass takes a new id with a `-vN` suffix: the new id moves the set digest, and a record
+made under the old one goes to its archived set, where the code that made it re-derives it. Three
+passes took new ids in 62781a8:
 
 | Old id | New id | What changed | Set digest, before and after |
 |---|---|---|---|
