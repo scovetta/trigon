@@ -66,9 +66,10 @@ default = ["build"]
 build = ["dep:trigon-politeness", "dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:trigon-api", "dep:trigon-engine", "dep:trigon-ai", "dep:tokio", "dep:async-trait", "dep:axum", "dep:reqwest", "wasm"]
 # Run an archived stabilizer set rather than only describing it, so a claim made under a set this
 # binary does not carry can still be re-derived. Part of `build`; off in the verifier
-# (`--no-default-features`) unless asked for with `--features wasm`: it roughly doubles the
-# verifier's dependency tree, and the small tree is the thing a sceptic checks instead of trusting
-# us. A verifier who only ever checks claims made under their own set never needs it.
+# (`--no-default-features`) unless asked for with `--features wasm`: it takes the verifier's
+# dependency tree from 109 crates to 154 (wasmtime 49), and needs Rust 1.96 where the rest declares
+# 1.85. The small tree is the thing a sceptic checks instead of trusting us, and a verifier who only
+# ever checks claims made under their own set never needs it.
 wasm = ["dep:trigon-stabilize-wasm", "trigon-stabilize-wasm/host"]
 
 [dev-dependencies]

@@ -38,8 +38,9 @@ the repository it claims, rather than whether it rebuilds.
 cargo build --release -p trigon
 ```
 
-Rust 1.85 or later, edition 2024. **`trigon verify` has no other prerequisites.** Rebuilding a
-package also needs `podman`.
+Rust 1.96 or later, edition 2024: the build's WebAssembly host, wasmtime 49, needs 1.96. The
+verifier build below leaves the host out and declares 1.85. **`trigon verify` has no other
+prerequisites.** Rebuilding a package also needs `podman`.
 
 ### The verifier build
 

@@ -56,7 +56,10 @@ impl ArchivedSet {
     /// to attribute. A stabilizer set that wants an import is not a stabilizer set.
     pub fn load(path: &Path) -> Result<Self> {
         let engine = Engine::default();
+        // `wasmtime::Error` is wasmtime's own type, and not a `std::error::Error`, so `anyhow`'s
+        // `Context` reaches it only once it is an `anyhow::Error`: here, and at each call below.
         let module = Module::from_file(&engine, path)
+            .map_err(anyhow::Error::from)
             .with_context(|| format!("loading {}", path.display()))?;
         Self::compiled(module)
     }
@@ -68,8 +71,9 @@ impl ArchivedSet {
     /// digest the verdict signs. Reading the file again to load it would run bytes nobody hashed.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let engine = Engine::default();
-        let module =
-            Module::new(&engine, bytes).context("reading the bytes as a WebAssembly module")?;
+        let module = Module::new(&engine, bytes)
+            .map_err(anyhow::Error::from)
+            .context("reading the bytes as a WebAssembly module")?;
         Self::compiled(module)
     }
 
@@ -102,6 +106,7 @@ impl ArchivedSet {
         let packed = own
             .set_digest
             .call(&mut own.store, (p, profile.len() as u32))
+            .map_err(anyhow::Error::from)
             .context("calling trigon_set_digest")?;
         if packed == 0 {
             bail!(
@@ -147,6 +152,7 @@ impl ArchivedSet {
                     data.len() as u32,
                 ),
             )
+            .map_err(anyhow::Error::from)
             .context("calling trigon_stabilize")?;
         if packed == 0 {
             // Re-ask the one question the sentinel merged away. If the module has the profile, the
@@ -174,6 +180,7 @@ impl ArchivedSet {
         };
         let packed = f
             .call(&mut own.store, ())
+            .map_err(anyhow::Error::from)
             .context("calling trigon_source_commit")?;
         if packed == 0 {
             return Ok(None);
@@ -227,14 +234,20 @@ impl Running {
     fn new(module: &Module) -> Result<Self> {
         let mut store = Store::new(module.engine(), ());
         let instance = Instance::new(&mut store, module, &[])
+            .map_err(anyhow::Error::from)
             .context("instantiating the stabilizer module")?;
         // Absent from a module built before the ABI asked, and read as naming no commit. Present
         // with another signature, it is not the ABI's function, and the module is refused.
         let source_commit = match instance.get_func(&mut store, "trigon_source_commit") {
             None => None,
-            Some(f) => Some(f.typed::<(), u64>(&store).context(
-                "the module exports `trigon_source_commit` with another signature than the ABI's",
-            )?),
+            Some(f) => Some(
+                f.typed::<(), u64>(&store)
+                    .map_err(anyhow::Error::from)
+                    .context(
+                        "the module exports `trigon_source_commit` with another signature than \
+                         the ABI's",
+                    )?,
+            ),
         };
         Ok(Running {
             memory: instance
@@ -252,6 +265,7 @@ impl Running {
         let ptr = self
             .alloc
             .call(&mut self.store, bytes.len() as u32)
+            .map_err(anyhow::Error::from)
             .context("calling trigon_alloc")?;
         self.memory
             .write(&mut self.store, ptr as usize, bytes)
@@ -293,6 +307,7 @@ where
 {
     instance
         .get_typed_func::<P, R>(&mut *store, name)
+        .map_err(anyhow::Error::from)
         .with_context(|| format!("the module exports no `{name}` with the expected signature"))
 }
 

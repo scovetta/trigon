@@ -279,7 +279,8 @@ path is `trigon rebuild --store` followed by `trigon attest` *(inferred, Q2)*.
 
 - **Platform.** Linux on x86-64 is what is built and tested; the build path needs `podman`
   *(assumption, Q3)*.
-- **Rust.** MSRV 1.85, and `#![forbid(unsafe_code)]` in the judgement half *(documented,
+- **Rust.** MSRV 1.85, except the `wasm` feature's WebAssembly host (wasmtime 49), which needs 1.96
+  and is on in the full build; and `#![forbid(unsafe_code)]` in the judgement half *(documented,
   crates/trigon-core/src/lib.rs:1-9)*.
 - **Container runtime.** An enforced-tier run needs rootless `podman`, plus a mirror image and a base
   image the operator built first *(documented, README.md "A note on `--egress open`")*.

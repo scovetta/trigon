@@ -95,11 +95,14 @@ object_store = "0.14"
 # a laptop and `postgres` for a fleet, which is what `10-scale.md` §4 asks for. `rustls` rather
 # than native TLS, matching every other network client in the tree.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "macros"] }
-# Only for the `wasm` feature of the verifier, which is off by default. Roughly doubles the
-# verifier's dependency tree (99 crates against the 100 it has), which is exactly why it is a
-# feature: the small binary is the claim, and only a verifier checking *across* stabilizer-set
-# digests needs to pay for a WASM host.
-wasmtime = { version = "40", default-features = false, features = ["runtime", "cranelift"] }
+# Only for the `wasm` feature: on in the full build, which runs stabilizer-set modules to attest and
+# re-derive, and off in the verifier (`--no-default-features`) unless asked for. It takes the
+# verifier's dependency tree from 109 crates to 154, which is exactly why it is a feature there: the
+# small binary is the claim, and only a verifier checking *across* stabilizer-set digests needs to
+# pay for a WASM host.
+# `anyhow`: since wasmtime 49 its errors are its own type, and this feature converts them into
+# `anyhow::Error` with their chain. Needs Rust 1.96, where the rest of the workspace declares 1.85.
+wasmtime = { version = "49.0.1", default-features = false, features = ["runtime", "cranelift", "anyhow"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
